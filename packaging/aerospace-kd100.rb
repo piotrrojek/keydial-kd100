@@ -9,9 +9,9 @@
 class AerospaceKd100 < Formula
   desc "Drive a Huion KD100 keypad + knob as an AeroSpace controller (no Huion driver)"
   homepage "https://github.com/piotrrojek/aerospace-kd100"
-  url "https://github.com/piotrrojek/aerospace-kd100/releases/download/v0.0.0/aerospace-kd100-0.0.0-macos-universal.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-  version "0.0.0"
+  url "https://github.com/piotrrojek/aerospace-kd100/releases/download/v0.1.0/aerospace-kd100-0.1.0-macos-universal.tar.gz"
+  sha256 "174ee8364d3b87a3b0187aa321128d5b33d748a5ecc478785a4198633e472ef8"
+  version "0.1.0"
   license "MIT"
 
   depends_on :macos
