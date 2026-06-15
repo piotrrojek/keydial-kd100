@@ -1,0 +1,11 @@
+.build/
+release-build/
+*.o
+*.swiftmodule
+kd100.log
+*.tar.gz
+*.pkg
+*.zip
+certificate.p12
+*.provisionprofile
+.DS_Store
