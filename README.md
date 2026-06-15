@@ -1,10 +1,15 @@
-# aerospace-kd100
+# keydial-kd100
 
 Turn a **Huion Keydial Mini (KD100)** — 18 keys + a rotary knob with center press —
-into an [AeroSpace](https://github.com/nikitabobko/AeroSpace) controller on macOS,
-**without installing Huion's driver**. A tiny userspace daemon opens the device over
-IOKit, **seizes** it (so the factory keystrokes never leak into focused apps), reads
-every control including the **knob**, and runs `aerospace` commands you configure.
+into a macOS **shortcut pad** that runs any shell command, **without installing
+Huion's driver**. A small menu-bar app opens the device over IOKit, **seizes** it
+(so the factory keystrokes never leak into focused apps), reads every control
+including the **knob**, and runs the command you bound to it.
+
+It ships with [AeroSpace](https://github.com/nikitabobko/AeroSpace) window-manager
+bindings as the **default example**, but each binding is just a `/bin/sh` line —
+rebind any key to `open -a …`, `osascript`, a script, anything — from the Settings
+window.
 
 ## Why this exists
 
@@ -13,52 +18,66 @@ every control including the **knob**, and runs `aerospace` commands you configur
   vendor-defined interface (`UsagePage 0xFF00`) that needs raw IOKit access to read.
 
 So mapping the knob *and* suppressing the factory keystrokes both require seizing the
-raw device — which is exactly what this daemon does. No Karabiner, no Huion software.
+raw device — which is exactly what this app does. No Karabiner, no Huion software.
 
 ## Install
 
 ### Homebrew
 
 ```bash
-brew install piotrrojek/tap/aerospace-kd100
-brew services start aerospace-kd100
+brew install piotrrojek/tap/keydial-kd100
+open "$(brew --prefix)/opt/keydial-kd100/kd100.app"
 ```
-
-Then complete the two one-time grants below.
 
 ### From source
 
 ```bash
-git clone https://github.com/piotrrojek/aerospace-kd100
-cd aerospace-kd100
-./scripts/install.sh run      # build, sign, install + start the LaunchAgent
+git clone https://github.com/piotrrojek/keydial-kd100
+cd keydial-kd100
+./scripts/install.sh        # build, sign, install to ~/Applications, and launch
 ```
+
+After it launches, look for the **dial icon in the menu bar**. There's no dock icon —
+it's a menu-bar (accessory) app.
 
 ### Two one-time manual steps (any install method)
 
-1. **Input Monitoring.** macOS requires it to read the device. After first start,
+1. **Input Monitoring.** macOS requires it to read the device. After first launch,
    enable **kd100** in *System Settings → Privacy & Security → Input Monitoring*, then
-   restart the daemon (`launchctl kickstart -k gui/$(id -u)/dev.otherlandlabs.kd100`,
-   or `brew services restart aerospace-kd100`).
+   **Quit** from the menu and relaunch (or rerun `./scripts/install.sh`). The menu
+   shows `⚠ Input Monitoring not granted` until this is done, with a shortcut to the
+   settings pane.
 2. **Karabiner-Elements (if installed).** Its grabber seizes all keyboards/pointers by
    default, which collides with us (`kIOReturnExclusiveAccess`). Set the KD100
    (vendor `0x256c` / product `0x6d`) to **"ignore"** in Karabiner's *Devices* tab.
+   The menu shows `⚠ Device busy (Karabiner?)` in this case.
 
-## Configure
+## Use
 
-Bindings live in `~/.config/kd100/mapping.json` (created on first run), keyed by
-**human key names** → shell command:
+The menu bar icon's menu shows:
+
+- **Live status** — `● Keypad connected` / `○ Waiting for keypad…` / a permission or
+  busy warning, plus the last control you pressed and the command it ran.
+- **Settings…** (⌘,) — a window with one editable field per physical key + knob action.
+  Type a command, hit **Save**, and it applies immediately (no restart). Leave a field
+  blank to disable that key. **Reset to Defaults** restores the AeroSpace example set.
+- **Open at Login** — register/unregister as a login item (macOS 13+).
+- **Quit KD100**.
+
+Bindings are stored in `~/.config/kd100/mapping.json` (created on first run), keyed by
+**human key names** → shell command. You can edit it by hand too (relaunch the app to
+pick up hand edits):
 
 ```jsonc
 "bindings": {
   "1": "aerospace workspace 1",
   "knob-cw":  "aerospace resize smart +50",
-  "knob-press": "aerospace balance-sizes",
-  "minus": "aerospace move-node-to-monitor --wrap-around next --focus-follows-window"
+  "knob-press": "open -a 'Mission Control'",
+  "minus": "osascript -e 'display notification \"hi\"'"
 }
 ```
 
-Valid key names (physical layout, rows 4/4/4/4/2 — column 4 is the split-`+`):
+Key names (physical layout, rows 4/4/4/4/2 — column 4 is the split-`+`):
 
 ```
 numlock  slash    star     minus
@@ -69,47 +88,48 @@ numlock  slash    star     minus
 knob-cw   knob-ccw   knob-press
 ```
 
-Each value is a raw shell line, so it isn't limited to `aerospace` — `open -a …`,
-`osascript`, scripts, anything. After editing, reload:
-
-```bash
-launchctl kickstart -k gui/$(id -u)/dev.otherlandlabs.kd100
-```
-
 ## How it works
 
-- **Swift + IOKit `IOHIDManager`.** One binary, two modes:
+- **Swift + IOKit `IOHIDManager`.** One binary, three entry points:
+  - `kd100` (no args) — the **menu-bar app**: status, Settings editor, Open at Login,
+    Quit. Runs the engine in seize mode in-process, so Settings edits apply live.
+  - `kd100 run` — headless: seize + dispatch with no UI (for a LaunchAgent / debugging).
   - `kd100 capture` — observe-only; logs decoded values + raw HID reports (used to
     reverse-engineer a device).
-  - `kd100 run` — opens with `kIOHIDOptionsTypeSeizeDevice`, reads raw reports,
-    dispatches each control to its shell command.
 - **Two mapping layers:** a fixed in-code `layout` table translates raw HID ids
   (`kb:MM:KK` keyboard / `cc:UU` consumer / `dial:*` knob) → human names; the JSON
   maps those names → commands. The cryptic ids never reach the config file.
 - **HID protocol:** buttons = report id 3 (keyboard) + id 1 (consumer); knob = vendor
   report id 17 — `byte2` is a signed delta (`+1` CW / `0xff` CCW), press = `byte1`
   bit `0x01`.
-- **Packaging:** ships as a signed, notarized `kd100.app` launched by a LaunchAgent,
-  so the Input Monitoring grant attaches to a stable code signature.
+- **Packaging:** ships as a signed, notarized `kd100.app` with `LSUIElement` so it
+  runs as a menu-bar accessory; the Input Monitoring grant attaches to the stable code
+  signature.
 
 ## Layout
 
-- `Sources/kd100/main.swift` — entry / arg parsing (`capture` | `run`).
-- `Sources/kd100/KD100.swift` — IOKit HID open/seize, callbacks, edge-detected dispatch.
-- `Sources/kd100/Mapping.swift` — layout table, config load, command dispatch.
-- `scripts/install.sh` — build + sign + (re)install the LaunchAgent locally.
+- `Sources/kd100/main.swift` — entry / arg parsing (`app` | `run` | `capture`).
+- `Sources/kd100/KD100.swift` — IOKit HID open/seize, callbacks, edge-detected
+  dispatch, connection-health hooks.
+- `Sources/kd100/Mapping.swift` — layout table, config load/save, live command dispatch.
+- `Sources/kd100/AppDelegate.swift` — menu-bar status item, menu, engine wiring.
+- `Sources/kd100/SettingsWindow.swift` — the key→command editor window.
+- `Sources/kd100/StatusIcon.swift` — the menu-bar dial icon.
+- `scripts/install.sh` — build + sign + install the app (or a headless agent for
+  `run`/`capture`).
 - `release.sh` + `.github/workflows/release.yml` — tag `v*` → universal build, sign,
   notarize, package `.pkg` + `.tar.gz`, GitHub release.
-- `packaging/aerospace-kd100.rb` — Homebrew formula template.
+- `packaging/keydial-kd100.rb` — Homebrew formula template.
 
 ## Troubleshooting
 
-- **Pad silent / AeroSpace not reacting?** Check the **side power button** — it's a
-  power toggle, not a wake button; when off, the LED is dark and there's no device to
-  read. The daemon re-grabs automatically on reconnect.
-- **`kIOReturnExclusiveAccess` (`0xE00002C5`)** in the log → another process holds the
-  device (Karabiner etc.).
-- **`kIOReturnNotPermitted` (`0xE00002E2`)** → Input Monitoring not granted yet.
+- **Pad silent / nothing reacting?** Check the **side power button** — it's a power
+  toggle, not a wake button; when off, the LED is dark and there's no device to read.
+  The app re-grabs automatically on reconnect (`○ Waiting…` → `● Connected`).
+- **`kIOReturnExclusiveAccess` (`0xE00002C5`)** → another process holds the device
+  (Karabiner etc.). Menu shows `⚠ Device busy`.
+- **`kIOReturnNotPermitted` (`0xE00002E2`)** → Input Monitoring not granted yet. Menu
+  shows `⚠ Input Monitoring not granted`.
 
 ## License
 

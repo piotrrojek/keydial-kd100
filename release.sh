@@ -42,12 +42,13 @@ cat > "$APP/Contents/Info.plist" << EOF
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundleExecutable</key><string>kd100</string>
     <key>CFBundleName</key><string>kd100</string>
-    <key>CFBundleDisplayName</key><string>KD100 Daemon</string>
+    <key>CFBundleDisplayName</key><string>KD100</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
     <key>LSUIElement</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHumanReadableCopyright</key><string>Copyright 2026 Piotr Rojek — https://piotrrojek.io</string>
 </dict>
 </plist>
@@ -81,7 +82,7 @@ exit 0
 PREINSTALL
 chmod +x "$PKG_SCRIPTS/postinstall" "$PKG_SCRIPTS/preinstall"
 
-PKG="$BUILD_DIR/aerospace-kd100-${VERSION}-macos-universal.pkg"
+PKG="$BUILD_DIR/keydial-kd100-${VERSION}-macos-universal.pkg"
 pkgbuild --root "$PKG_ROOT" --scripts "$PKG_SCRIPTS" \
     --identifier "$BUNDLE_ID" --version "$VERSION" \
     --sign "$INSTALLER_IDENTITY" "$PKG"

@@ -1,0 +1,145 @@
+import AppKit
+import Foundation
+#if canImport(ServiceManagement)
+import ServiceManagement
+#endif
+
+/// Menu-bar (tray) app. Owns the KD100 engine in `run` mode, shows live
+/// connection status, opens the Settings window, and offers Open-at-Login + Quit.
+/// No dock icon — the app runs as an accessory (LSUIElement / .accessory policy).
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem!
+    private let engine = KD100(mode: .run)
+    private var settings: SettingsWindowController?
+
+    // Menu items kept around so callbacks can mutate their titles/state.
+    private var statusLine: NSMenuItem!
+    private var lastFireLine: NSMenuItem!
+    private var permissionItem: NSMenuItem!
+    private var loginItem: NSMenuItem!
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.image = StatusIcon.menuBarImage()
+        statusItem.button?.toolTip = "KD100 — Keydial controller"
+        statusItem.menu = buildMenu()
+
+        wireEngine()
+        engine.start()
+    }
+
+    // MARK: - Menu
+
+    private func buildMenu() -> NSMenu {
+        let menu = NSMenu()
+
+        statusLine = disabledItem("Starting…")
+        menu.addItem(statusLine)
+        lastFireLine = disabledItem("No input yet")
+        menu.addItem(lastFireLine)
+
+        permissionItem = NSMenuItem(title: "Open Input Monitoring settings…",
+                                    action: #selector(openInputMonitoring), keyEquivalent: "")
+        permissionItem.target = self
+        permissionItem.isHidden = true
+        menu.addItem(permissionItem)
+
+        menu.addItem(.separator())
+
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
+        loginItem.target = self
+        menu.addItem(loginItem)
+        refreshLoginState()
+
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "Quit KD100", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+
+        return menu
+    }
+
+    private func disabledItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    // MARK: - Engine wiring
+
+    private func wireEngine() {
+        engine.onHealth = { [weak self] health in
+            DispatchQueue.main.async { self?.apply(health) }
+        }
+        engine.mapping.onFire = { [weak self] name, cmd in
+            DispatchQueue.main.async {
+                if let cmd = cmd, !cmd.isEmpty {
+                    self?.lastFireLine.title = "Last: \(name) → \(cmd)"
+                } else {
+                    self?.lastFireLine.title = "Last: \(name) (unmapped)"
+                }
+            }
+        }
+    }
+
+    private func apply(_ health: KD100.Health) {
+        permissionItem.isHidden = true
+        switch health {
+        case .connected:       statusLine.title = "● Keypad connected"
+        case .waiting:         statusLine.title = "○ Waiting for keypad…"
+        case .needsPermission:
+            statusLine.title = "⚠ Input Monitoring not granted"
+            permissionItem.isHidden = false
+        case .busy:            statusLine.title = "⚠ Device busy (Karabiner?)"
+        case .error(let code): statusLine.title = "⚠ Open failed \(code)"
+        }
+    }
+
+    // MARK: - Actions
+
+    @objc private func openSettings() {
+        if settings == nil { settings = SettingsWindowController(mapping: engine.mapping) }
+        NSApp.activate(ignoringOtherApps: true)
+        settings?.showWindow(nil)
+        settings?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func openInputMonitoring() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func quit() { NSApp.terminate(nil) }
+
+    // MARK: - Open at Login (macOS 13+)
+
+    @objc private func toggleLogin() {
+        if #available(macOS 13.0, *) {
+            do {
+                if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
+                } else {
+                    try SMAppService.mainApp.register()
+                }
+            } catch {
+                NSLog("KD100: Open-at-Login toggle failed: \(error.localizedDescription)")
+            }
+            refreshLoginState()
+        }
+    }
+
+    private func refreshLoginState() {
+        if #available(macOS 13.0, *) {
+            loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+            loginItem.isHidden = false
+        } else {
+            loginItem.isHidden = true   // pre-13 has no clean SMAppService path
+        }
+    }
+}

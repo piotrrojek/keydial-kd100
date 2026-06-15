@@ -65,7 +65,7 @@ jobs:
         run: |
           # Package the signed, notarized, stapled .app as a tarball for Homebrew.
           # Shipped as-is to preserve the code signature + stapled ticket.
-          tar -czf "release-build/aerospace-kd100-${VERSION}-macos-universal.tar.gz" \
+          tar -czf "release-build/keydial-kd100-${VERSION}-macos-universal.tar.gz" \
             -C release-build kd100.app
 
       - name: Upload release assets
@@ -73,17 +73,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          PKG="release-build/aerospace-kd100-${VERSION}-macos-universal.pkg"
-          TAR="release-build/aerospace-kd100-${VERSION}-macos-universal.tar.gz"
+          PKG="release-build/keydial-kd100-${VERSION}-macos-universal.pkg"
+          TAR="release-build/keydial-kd100-${VERSION}-macos-universal.tar.gz"
           gh release create "$GITHUB_REF_NAME" \
             "$PKG" "$TAR" \
-            --title "aerospace-kd100 v${VERSION}" \
+            --title "keydial-kd100 v${VERSION}" \
             --generate-notes
 
       - name: Print Homebrew SHA256
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          echo "=== Update Formula/aerospace-kd100.rb in piotrrojek/homebrew-tap ==="
-          echo "url:    https://github.com/piotrrojek/aerospace-kd100/releases/download/${GITHUB_REF_NAME}/aerospace-kd100-${VERSION}-macos-universal.tar.gz"
-          echo "sha256: $(shasum -a 256 release-build/aerospace-kd100-${VERSION}-macos-universal.tar.gz | cut -d' ' -f1)"
+          echo "=== Update Formula/keydial-kd100.rb in piotrrojek/homebrew-tap ==="
+          echo "url:    https://github.com/piotrrojek/keydial-kd100/releases/download/${GITHUB_REF_NAME}/keydial-kd100-${VERSION}-macos-universal.tar.gz"
+          echo "sha256: $(shasum -a 256 release-build/keydial-kd100-${VERSION}-macos-universal.tar.gz | cut -d' ' -f1)"

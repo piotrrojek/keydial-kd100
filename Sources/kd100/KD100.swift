@@ -7,15 +7,29 @@ import IOKit.hid
 final class KD100 {
     enum Mode { case capture, run }
 
+    /// Live state of the device connection, surfaced to the tray app's menu.
+    enum Health {
+        case waiting          // opened OK, no keypad present yet (or unplugged)
+        case connected        // keypad seen and being read
+        case needsPermission  // Input Monitoring (TCC) not granted
+        case busy             // another process holds the device (Karabiner etc.)
+        case error(String)    // any other IOHIDManagerOpen failure (hex code)
+    }
+
     let vendorID = 0x256c
     let productID = 0x6d
     let reportLen = 64
     let mode: Mode
     let seize: Bool
 
+    /// Exposed so the tray app shares one mapping instance (edits apply live).
+    let mapping = Mapping()
+    /// Set by the tray app to reflect connection/permission state in the menu.
+    /// Invoked on the run loop the manager is scheduled on.
+    var onHealth: ((Health) -> Void)?
+
     private var manager: IOHIDManager!
     private var buffers: [UnsafeMutablePointer<UInt8>] = []
-    private let mapping = Mapping()
 
     // Edge-detection state so each press fires once (ignore key-up + auto-repeat).
     private var kbIdle = true
@@ -44,6 +58,11 @@ final class KD100 {
             Unmanaged<KD100>.fromOpaque(context).takeUnretainedValue().deviceAdded(device)
         }, ctx)
 
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { context, _, _, _ in
+            guard let context = context else { return }
+            Unmanaged<KD100>.fromOpaque(context).takeUnretainedValue().deviceRemoved()
+        }, ctx)
+
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
 
         let opts: IOOptionBits = seize ? IOOptionBits(kIOHIDOptionsTypeSeizeDevice)
@@ -51,9 +70,20 @@ final class KD100 {
         let r = IOHIDManagerOpen(manager, opts)
         if r == kIOReturnSuccess {
             log("OPEN OK  mode=\(mode)  seize=\(seize)  vendor=0x\(String(vendorID, radix: 16)) product=0x\(String(productID, radix: 16))")
+            onHealth?(.waiting)  // open succeeded; deviceAdded flips this to .connected
         } else {
-            log("OPEN FAILED 0x\(String(format: "%08X", UInt32(bitPattern: r))) — grant Input Monitoring to this binary, then `launchctl kickstart -k`")
+            log("OPEN FAILED 0x\(String(format: "%08X", UInt32(bitPattern: r))) — grant Input Monitoring to this binary, then relaunch")
+            switch r {
+            case kIOReturnNotPermitted: onHealth?(.needsPermission)
+            case kIOReturnExclusiveAccess: onHealth?(.busy)
+            default: onHealth?(.error("0x\(String(format: "%08X", UInt32(bitPattern: r)))"))
+            }
         }
+    }
+
+    private func deviceRemoved() {
+        log("device-")
+        onHealth?(.waiting)
     }
 
     private func deviceAdded(_ device: IOHIDDevice) {
@@ -61,6 +91,7 @@ final class KD100 {
         let pup = (IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsagePageKey as CFString) as? Int) ?? -1
         let pu  = (IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsageKey as CFString) as? Int) ?? -1
         log("device+ [\(name)] primaryUsagePage=0x\(String(format: "%04X", pup)) primaryUsage=0x\(String(format: "%02X", pu))")
+        onHealth?(.connected)
 
         let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: reportLen)
         buffers.append(buf)
