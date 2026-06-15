@@ -17,8 +17,10 @@ class AerospaceKd100 < Formula
   depends_on :macos
 
   def install
-    # Tarball top-level is the signed, notarized, stapled kd100.app.
-    prefix.install "kd100.app"
+    # The tarball's single top-level dir (kd100.app) is stripped by Homebrew on
+    # extraction, so the staged files are the bundle's innards (Contents/…).
+    # Reconstruct kd100.app from them.
+    (prefix/"kd100.app").install Dir["*"]
     bin.install_symlink prefix/"kd100.app/Contents/MacOS/kd100"
   end
 
