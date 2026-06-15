@@ -17,7 +17,7 @@ raw device — which is exactly what this daemon does. No Karabiner, no Huion so
 
 ## Install
 
-### Homebrew (recommended, once published)
+### Homebrew
 
 ```bash
 brew install piotrrojek/tap/aerospace-kd100
@@ -102,25 +102,13 @@ launchctl kickstart -k gui/$(id -u)/dev.otherlandlabs.kd100
   notarize, package `.pkg` + `.tar.gz`, GitHub release.
 - `packaging/aerospace-kd100.rb` — Homebrew formula template.
 
-## Releasing
-
-Push a tag; the workflow builds/signs/notarizes and publishes the release:
-
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-It prints the new `url` + `sha256`; paste those into `Formula/aerospace-kd100.rb` in
-`piotrrojek/homebrew-tap`. Requires repo secrets: `CERTIFICATE_P12`,
-`CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`.
-
 ## Troubleshooting
 
 - **Pad silent / AeroSpace not reacting?** Check the **side power button** — it's a
   power toggle, not a wake button; when off, the LED is dark and there's no device to
   read. The daemon re-grabs automatically on reconnect.
 - **`kIOReturnExclusiveAccess` (`0xE00002C5`)** in the log → another process holds the
-  device (almost always Karabiner — see step 2 above).
+  device (Karabiner etc.).
 - **`kIOReturnNotPermitted` (`0xE00002E2`)** → Input Monitoring not granted yet.
 
 ## License
