@@ -120,6 +120,22 @@ Switching is manual — there's no automatic per-app switching.
 A worked example — driving cTrader for Mac (chart control, trades, live P&L) through a
 cTrader Automate plugin — is in [`examples/ctrader/`](examples/ctrader/).
 
+### Status file (for external bars)
+
+If you hide the macOS menu bar (e.g. behind [sketchybar](https://github.com/FelixKratz/SketchyBar)),
+the app's connection dot + active-profile indicator go with it. So the app also publishes its
+live state to `~/.config/kd100/status.json` — rewritten on every health/profile change:
+
+```json
+{ "schema": 1, "health": "connected", "detail": "",
+  "profile": "default", "profiles": ["default", "cTrader"], "ts": 1781624722 }
+```
+
+`health` is one of `connected | waiting | needs_permission | busy | error`. There's no
+heartbeat — treat the **process** (`pgrep -x kd100`) as the liveness signal and this file as
+the detail. A ready-made sketchybar pill (dial + active profile, click for a cheat-sheet of the
+active profile's bindings) lives in [`examples/sketchybar/`](examples/sketchybar/).
+
 ## How it works
 
 - **Swift + IOKit `IOHIDManager`.** One binary, three entry points:

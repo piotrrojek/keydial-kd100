@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let engine = KD100(mode: .run)
     private var settings: SettingsWindowController?
+    private let status = StatusExporter()   // publishes ~/.config/kd100/status.json for an external bar
 
     // Menu items kept around so callbacks can mutate their titles/state.
     private var statusLine: NSMenuItem!
@@ -124,18 +125,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.imagePosition = .imageLeading
             button.title = (name == "default") ? "" : " \(name)"
         }
+        status.setProfiles(active: name, all: engine.mapping.profileSummaries().map(\.name))
     }
 
     private func apply(_ health: KD100.Health) {
         permissionItem.isHidden = true
         switch health {
-        case .connected:       statusLine.title = "● Keypad connected"
-        case .waiting:         statusLine.title = "○ Waiting for keypad…"
+        case .connected:
+            statusLine.title = "● Keypad connected"
+            status.setHealth("connected")
+        case .waiting:
+            statusLine.title = "○ Waiting for keypad…"
+            status.setHealth("waiting")
         case .needsPermission:
             statusLine.title = "⚠ Input Monitoring not granted"
             permissionItem.isHidden = false
-        case .busy:            statusLine.title = "⚠ Device busy (Karabiner?)"
-        case .error(let code): statusLine.title = "⚠ Open failed \(code)"
+            status.setHealth("needs_permission")
+        case .busy:
+            statusLine.title = "⚠ Device busy (Karabiner?)"
+            status.setHealth("busy")
+        case .error(let code):
+            statusLine.title = "⚠ Open failed \(code)"
+            status.setHealth("error", detail: "\(code)")
         }
     }
 
