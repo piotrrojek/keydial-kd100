@@ -62,6 +62,8 @@ The menu bar icon's menu shows:
   busy warning, plus the last control you pressed and the command it ran (or
   `→ failed (code)` with the error if it didn't).
 - **Settings…** (⌘,) — a window with:
+  - a **profile picker** + **Add for App…** / **Remove** — each profile is a named binding
+    set (see [Profiles](#profiles));
   - a **visual device map** of the pad (rows 4/4/4/4/2 + knob) — click a key to jump to
     its command field;
   - a **Listen** toggle — flip it on and press a key on the pad to locate it in the list
@@ -74,15 +76,21 @@ The menu bar icon's menu shows:
 - **Quit KD100**.
 
 Bindings are stored in `~/.config/kd100/mapping.json` (created on first run), keyed by
-**human key names** → shell command. You can edit it by hand too — the app watches the
-file and **picks up hand edits live** (no relaunch):
+**human key names** → shell command, grouped into [profiles](#profiles). You can edit it
+by hand too — the app watches the file and **picks up hand edits live** (no relaunch):
 
 ```jsonc
-"bindings": {
-  "1": "aerospace workspace 1",
-  "knob-cw":  "aerospace resize smart +50",
-  "knob-press": "open -a 'Mission Control'",
-  "minus": "osascript -e 'display notification \"hi\"'"
+{
+  "profiles": [
+    { "name": "default", "bindings": {
+        "1": "aerospace workspace 1",
+        "knob-cw": "aerospace resize smart +50",
+        "minus": "osascript -e 'display notification \"hi\"'"
+    } },
+    { "name": "cTrader", "match": "com.spotware.ctmac", "bindings": {
+        "1": "open -a 'Mission Control'"
+    } }
+  ]
 }
 ```
 
@@ -96,6 +104,21 @@ numlock  slash    star     minus
 0        dot
 knob-cw   knob-ccw   knob-press
 ```
+
+## Profiles
+
+A **profile** is a named binding set. There's always a `default`; add more (e.g. one
+per app) from Settings → **Add for App…**, which seeds a copy of `default`. A profile
+only needs to list the keys that differ — anything it doesn't define **falls through to
+`default`**, and a key set to `""` is disabled in that profile.
+
+**Switch profiles with the knob press.** It's reserved app-wide to cycle
+`default → … → default` (so it can't be bound to a command in any profile), and the
+**active profile name shows next to the menu-bar dial icon** (blank for `default`).
+Switching is manual — there's no automatic per-app switching.
+
+A worked example — driving cTrader for Mac (chart control, trades, live P&L) through a
+cTrader Automate plugin — is in [`examples/ctrader/`](examples/ctrader/).
 
 ## How it works
 
@@ -142,6 +165,7 @@ knob-cw   knob-ccw   knob-press
 - `release.sh` + `.github/workflows/release.yml` — tag `v*` → universal build, sign,
   notarize, package `.pkg` + `.tar.gz`, GitHub release.
 - `packaging/keydial-kd100.rb` — Homebrew formula template.
+- `examples/ctrader/` — a worked profile: drive cTrader for Mac via a cTrader Automate plugin.
 
 ## Troubleshooting
 

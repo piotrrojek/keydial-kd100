@@ -66,6 +66,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var listenHint: NSTextField!
     private var listening = false
 
+    /// Called after the profile set is committed (Save), so the tray app can refresh
+    /// the active-profile menu line.
+    var onProfilesChanged: (() -> Void)?
+
+    /// In-memory working copy of every profile. Edits live here until Save commits the
+    /// whole set in one shot (`mapping.replaceAllProfiles`) — so switching the editor
+    /// between profiles never loses or prematurely persists changes.
+    private struct EditProfile { var name: String; var bundleId: String?; var bindings: [String: String] }
+    private var workingProfiles: [EditProfile] = []
+    private var editingIndex = 0
+    private var profilePopup: NSPopUpButton!
+    private var removeButton: NSButton!
+    private var profileHint: NSTextField!
+
     init(mapping: Mapping) {
         self.mapping = mapping
         let window = NSWindow(
@@ -100,12 +114,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func buildUI() {
         guard let content = window?.contentView else { return }
 
-        // --- Fixed top: help + device map + Listen toggle ---
+        // --- Fixed top: help + profile picker + device map + Listen toggle ---
         let help = makeHelp(
             "Each key runs the command below via your login shell ($SHELL -ilc), so it sees the "
             + "same PATH/tools a Terminal does. Commands aren't limited to aerospace — use open, "
             + "osascript, scripts, anything. Blank = disabled. ▶ tests a command now; Save applies "
             + "everything immediately.")
+
+        let profileBar = buildProfileBar()
+        profileHint = NSTextField(labelWithString: "")
+        profileHint.font = .systemFont(ofSize: 11)
+        profileHint.textColor = .secondaryLabelColor
+        profileHint.lineBreakMode = .byTruncatingTail
+        profileHint.translatesAutoresizingMaskIntoConstraints = false
 
         let mapTitle = makeSectionHeader("Device map — click a key to edit it")
         let keypad = buildKeypadMap()
@@ -118,11 +139,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         listenHint.textColor = .secondaryLabelColor
         listenHint.translatesAutoresizingMaskIntoConstraints = false
 
-        let topStack = NSStackView(views: [help, mapTitle, keypad, listenButton, listenHint])
+        let topStack = NSStackView(views: [help, profileBar, profileHint, mapTitle, keypad, listenButton, listenHint])
         topStack.orientation = .vertical
         topStack.alignment = .leading
         topStack.spacing = 8
         topStack.translatesAutoresizingMaskIntoConstraints = false
+        topStack.setCustomSpacing(12, after: profileHint)
         topStack.setCustomSpacing(12, after: keypad)
         content.addSubview(topStack)
 
@@ -206,6 +228,32 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         help.preferredMaxLayoutWidth = 540
     }
 
+    /// Profile picker row: [Profile: ▾] [Add for App…] [Remove]. Selecting a profile
+    /// swaps which binding set the fields below show/edit.
+    private func buildProfileBar() -> NSView {
+        let label = NSTextField(labelWithString: "Profile:")
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        profilePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        profilePopup.target = self
+        profilePopup.action = #selector(profileChanged(_:))
+        profilePopup.translatesAutoresizingMaskIntoConstraints = false
+        profilePopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let addButton = makeButton("Add for App…", #selector(addProfileTapped))
+        addButton.toolTip = "Create a profile that activates while a chosen app is frontmost"
+        removeButton = makeButton("Remove", #selector(removeProfileTapped))
+        removeButton.toolTip = "Delete the selected app profile (the default profile can't be removed)"
+
+        let bar = NSStackView(views: [label, profilePopup, addButton, removeButton])
+        bar.orientation = .horizontal
+        bar.spacing = 8
+        bar.alignment = .firstBaseline
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        return bar
+    }
+
     /// The visual keypad: rows 4/4/4/4/2 then a centered knob trio.
     private func buildKeypadMap() -> NSView {
         let rows: [[String]] = [
@@ -270,6 +318,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         label.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.widthAnchor.constraint(equalToConstant: 96).isActive = true
+
+        // The profile-switch control is reserved app-wide — not editable per profile.
+        if name == Mapping.profileSwitchControl {
+            let note = NSTextField(labelWithString: "↻ cycles profiles (reserved)")
+            note.font = .systemFont(ofSize: 12)
+            note.textColor = .secondaryLabelColor
+            note.translatesAutoresizingMaskIntoConstraints = false
+            let row = NSStackView(views: [label, note])
+            row.orientation = .horizontal
+            row.alignment = .firstBaseline
+            row.spacing = 10
+            row.translatesAutoresizingMaskIntoConstraints = false
+            return row
+        }
 
         let field = NSTextField()
         field.placeholderString = "(disabled)"
@@ -351,25 +413,147 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func saveTapped() {
-        var out: [String: String] = [:]
-        for (name, field) in fields {
-            out[name] = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        mapping.update(out)
+        captureFields()
+        mapping.replaceAllProfiles(workingProfiles.map { ($0.name, $0.bundleId, $0.bindings) })
+        onProfilesChanged?()
         flashSaved()
     }
 
     @objc private func resetTapped() {
-        var defaults: [String: String] = [:]
-        for (name, cmd) in Mapping.defaults { defaults[name] = cmd }
+        let defaults = Mapping.defaultsDict()
         for (name, field) in fields { field.stringValue = defaults[name] ?? "" }
-        savedLabel.stringValue = "Defaults loaded — press Save to apply"
+        let who = workingProfiles.isEmpty ? "default" : workingProfiles[editingIndex].name
+        savedLabel.stringValue = "Defaults loaded for \(who) — press Save to apply"
+    }
+
+    // MARK: - Profile switching
+
+    @objc private func profileChanged(_ sender: NSPopUpButton) {
+        let idx = sender.indexOfSelectedItem
+        guard idx >= 0, idx < workingProfiles.count, idx != editingIndex else { return }
+        captureFields()
+        editingIndex = idx
+        populateFields()
+        removeButton.isEnabled = (workingProfiles[editingIndex].name != "default")
+        updateProfileHint()
+    }
+
+    @objc private func addProfileTapped() {
+        // Offer the currently-running regular apps (one entry per bundle id), minus us.
+        var seen = Set<String>()
+        let apps = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular
+                      && $0.bundleIdentifier != nil
+                      && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+            .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
+            .filter { seen.insert($0.bundleIdentifier!).inserted }
+        guard !apps.isEmpty else { savedLabel.stringValue = "No other running apps to add"; return }
+
+        let alert = NSAlert()
+        alert.messageText = "Add a profile for an app"
+        alert.informativeText = "Creates a named profile (seeded as a copy of your default bindings) — "
+            + "change only what should differ. Switch to it with the knob press; the active profile "
+            + "shows by the menu-bar icon."
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
+        for a in apps { popup.addItem(withTitle: a.localizedName ?? a.bundleIdentifier!) }
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let sel = popup.indexOfSelectedItem
+        guard sel >= 0, sel < apps.count else { return }
+        let app = apps[sel]
+        let bid = app.bundleIdentifier!
+
+        captureFields()
+        if let existing = workingProfiles.firstIndex(where: { $0.bundleId == bid }) {
+            editingIndex = existing
+            rebuildProfilePopup(); populateFields(); updateProfileHint()
+            savedLabel.stringValue = "Already have a profile for that app — selected it"
+            return
+        }
+        let name = uniqueName(app.localizedName ?? bid)
+        let seed = workingProfiles.first(where: { $0.name == "default" })?.bindings ?? Mapping.defaultsDict()
+        workingProfiles.append(EditProfile(name: name, bundleId: bid, bindings: seed))
+        editingIndex = workingProfiles.count - 1
+        rebuildProfilePopup(); populateFields(); updateProfileHint()
+        savedLabel.stringValue = "Added \(name) — edit and Save to apply"
+    }
+
+    @objc private func removeProfileTapped() {
+        guard editingIndex < workingProfiles.count,
+              workingProfiles[editingIndex].name != "default" else { return }
+        let removed = workingProfiles.remove(at: editingIndex)
+        editingIndex = 0
+        rebuildProfilePopup(); populateFields(); updateProfileHint()
+        savedLabel.stringValue = "Removed \(removed.name) — Save to apply"
+    }
+
+    /// A profile name unique within the current working set (and never "default").
+    private func uniqueName(_ base: String) -> String {
+        var stem = base.isEmpty ? "Profile" : base
+        if stem == "default" { stem = "Default App" }
+        let existing = Set(workingProfiles.map { $0.name })
+        if !existing.contains(stem) { return stem }
+        var n = 2
+        while existing.contains("\(stem) (\(n))") { n += 1 }
+        return "\(stem) (\(n))"
+    }
+
+    // MARK: - Working-model <-> fields
+
+    /// Read the current field values into the profile being edited.
+    private func captureFields() {
+        guard editingIndex < workingProfiles.count else { return }
+        var b: [String: String] = [:]
+        for (name, field) in fields {
+            b[name] = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        workingProfiles[editingIndex].bindings = b
+    }
+
+    /// Fill the fields from the profile being edited.
+    private func populateFields() {
+        let b = (editingIndex < workingProfiles.count) ? workingProfiles[editingIndex].bindings : [:]
+        for (name, field) in fields { field.stringValue = b[name] ?? "" }
+    }
+
+    private func rebuildProfilePopup() {
+        profilePopup.removeAllItems()
+        profilePopup.addItems(withTitles: workingProfiles.map { $0.name })
+        if editingIndex < workingProfiles.count { profilePopup.selectItem(at: editingIndex) }
+        removeButton.isEnabled = (editingIndex < workingProfiles.count
+                                  && workingProfiles[editingIndex].name != "default")
+    }
+
+    private func updateProfileHint() {
+        guard editingIndex < workingProfiles.count else { profileHint.stringValue = ""; return }
+        let p = workingProfiles[editingIndex]
+        if p.name == "default" {
+            profileHint.stringValue = "Default profile. Press the knob to cycle to the next profile (shown by the menu-bar icon)."
+        } else {
+            let forApp = p.bundleId.map { " (for \($0))" } ?? ""
+            profileHint.stringValue = "Profile \"\(p.name)\"\(forApp). Cycle to it with the knob press. "
+                + "Blank a key to disable it here; the knob press itself is reserved for switching."
+        }
     }
 
     // MARK: - Load
 
     private func reload() {
-        for (name, cmd) in mapping.current() { fields[name]?.stringValue = cmd }
+        workingProfiles = mapping.profileSummaries().map { sum in
+            let b = Dictionary(uniqueKeysWithValues:
+                mapping.bindings(forProfile: sum.name).map { ($0.name, $0.cmd) })
+            return EditProfile(name: sum.name, bundleId: sum.bundleId, bindings: b)
+        }
+        if workingProfiles.isEmpty {
+            workingProfiles = [EditProfile(name: "default", bundleId: nil, bindings: Mapping.defaultsDict())]
+        }
+        if editingIndex >= workingProfiles.count { editingIndex = 0 }
+        rebuildProfilePopup()
+        populateFields()
+        updateProfileHint()
     }
 
     private func flashSaved() {

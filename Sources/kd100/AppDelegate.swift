@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Menu items kept around so callbacks can mutate their titles/state.
     private var statusLine: NSMenuItem!
     private var lastFireLine: NSMenuItem!
+    private var profileLine: NSMenuItem!
     private var permissionItem: NSMenuItem!
     private var loginItem: NSMenuItem!
 
@@ -37,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(statusLine)
         lastFireLine = disabledItem("No input yet")
         menu.addItem(lastFireLine)
+
+        profileLine = disabledItem("Profile: default")
+        profileLine.isHidden = true   // only shown once an app-specific profile exists
+        menu.addItem(profileLine)
 
         permissionItem = NSMenuItem(title: "Open Input Monitoring settings…",
                                     action: #selector(openInputMonitoring), keyEquivalent: "")
@@ -97,9 +102,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         engine.mapping.onExternalChange = { [weak self] in
-            self?.settings?.reloadFromMapping()
+            self?.settings?.reloadFromMapping()   // load() also re-fires onActiveProfileChange
+        }
+        engine.mapping.onActiveProfileChange = { [weak self] name in
+            DispatchQueue.main.async { self?.updateProfileLine(name) }
         }
         engine.mapping.startWatching()
+        updateProfileLine(engine.mapping.activeProfileName)
+    }
+
+    // MARK: - Active profile indicator
+
+    /// Reflect the manually-selected active profile: a menu line, and — when not the
+    /// default — the profile name next to the menu-bar dial icon. The knob press
+    /// cycles profiles (Mapping reserves that control), which drives this callback.
+    private func updateProfileLine(_ name: String) {
+        let multi = engine.mapping.profileSummaries().count > 1
+        profileLine.isHidden = !multi
+        profileLine.title = "Profile: \(name)"
+        if let button = statusItem.button {
+            button.imagePosition = .imageLeading
+            button.title = (name == "default") ? "" : " \(name)"
+        }
     }
 
     private func apply(_ health: KD100.Health) {
@@ -118,7 +142,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func openSettings() {
-        if settings == nil { settings = SettingsWindowController(mapping: engine.mapping) }
+        if settings == nil {
+            settings = SettingsWindowController(mapping: engine.mapping)
+            settings?.onProfilesChanged = { [weak self] in
+                guard let self else { return }
+                self.updateProfileLine(self.engine.mapping.activeProfileName)
+            }
+        }
         NSApp.activate(ignoringOtherApps: true)
         settings?.showWindow(nil)
         settings?.window?.makeKeyAndOrderFront(nil)

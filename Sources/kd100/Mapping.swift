@@ -1,15 +1,23 @@
 import Foundation
 
-/// Control → shell-command mapping.
+/// Control → shell-command mapping, with **per-app profiles**.
 ///
-/// Two layers:
+/// Three layers:
 ///  1. `layout` — fixed, device-specific table: raw HID id → human key name.
 ///     The raw ids come from the HID report (`kb:MM:KK` keyboard, `cc:UU` consumer,
 ///     `dial:*` knob). This never changes for a given KD100.
-///  2. `~/.config/kd100/mapping.json` — user-editable, keyed by the **human names**
-///     → shell command. The menu-bar app's Settings window edits this file and
-///     applies changes live (no restart). Hand-edits to the file are also picked up
-///     live now, via a file watcher (`startWatching()`).
+///  2. **Profiles** — a `default` profile plus optional app-specific profiles, each
+///     matched to a frontmost-app bundle id. The active profile is chosen
+///     automatically from whatever app is frontmost (`setActiveContext(bundleId:)`),
+///     so the pad means different things in different apps with zero key-presses.
+///  3. `~/.config/kd100/mapping.json` — user-editable, keyed by the **human names**
+///     → shell command, grouped per profile. The menu-bar app's Settings window
+///     edits this file and applies changes live (no restart). Hand-edits are also
+///     picked up live, via a file watcher (`startWatching()`).
+///
+/// Resolution: the active profile's binding wins; a key the active profile doesn't
+/// define **falls through to `default`** (so an app profile only needs to list what
+/// differs). A key bound to "" is explicitly disabled in that profile.
 ///
 /// Commands run through the user's **login + interactive** shell (`$SHELL -ilc`) so
 /// they inherit the same environment a terminal would — `PATH` additions, mise/asdf
@@ -41,7 +49,7 @@ final class Mapping {
     /// The three knob actions — rendered as a separate section in Settings.
     static let knobNames: Set<String> = ["knob-cw", "knob-ccw", "knob-press"]
 
-    /// Default command per human key name. Written to mapping.json on first run.
+    /// Default command per human key name. Written to the `default` profile on first run.
     static let defaults: [(name: String, cmd: String)] = [
         // Row 1: numlock slash star minus
         ("numlock",    "aerospace flatten-workspace-tree"),
@@ -72,10 +80,26 @@ final class Mapping {
         ("knob-press", "aerospace balance-sizes"),
     ]
 
-    static let configNote = "key = KD100 physical key (numlock slash star minus / 7 8 9 plus-upper / 4 5 6 plus-lower / 1 2 3 enter / 0 dot / knob-cw knob-ccw knob-press); value = shell command run via your login shell ($SHELL -ilc). Edit in the menu-bar app's Settings window (applies live), or edit here — changes are picked up live."
+    /// The built-in defaults as a dictionary (handy for seeding profiles).
+    static func defaultsDict() -> [String: String] {
+        Dictionary(uniqueKeysWithValues: Mapping.defaults.map { ($0.name, $0.cmd) })
+    }
+
+    static let configNote = "Per-app profiles: \"default\" is used unless the frontmost app matches another profile's \"match\" (its bundle id). Within a profile, key = KD100 physical key (numlock slash star minus / 7 8 9 plus-upper / 4 5 6 plus-lower / 1 2 3 enter / 0 dot / knob-cw knob-ccw knob-press); value = shell command run via your login shell ($SHELL -ilc). A key omitted from a profile falls through to \"default\"; a key set to \"\" is disabled there. Edit in the menu-bar app's Settings window (applies live), or edit here — changes are picked up live."
+
+    /// One binding set, optionally bound to a frontmost-app bundle id.
+    private struct Profile {
+        var name: String            // display name + JSON key; "default" is reserved/required
+        var bundleId: String?       // frontmost-app match; nil for "default"
+        var bindings: [String: String]   // human name -> command
+    }
 
     private let idToName: [String: String]
-    private var bindings: [String: String] = [:]   // human name -> command (guarded by `lock`)
+    /// Profiles, guarded by `lock`. `profiles[0]` is always the `default` profile.
+    private var profiles: [Profile] = []
+    /// Index of the manually-selected active profile (guarded by `lock`). Advanced by
+    /// the profile-switch control; there is no automatic frontmost-app switching.
+    private var _activeIndex = 0
     let path: String
 
     /// Fired whenever a control is activated, on the HID callback thread. `cmd` is
@@ -92,6 +116,10 @@ final class Mapping {
     /// Fired (on the main queue) when the config file changes on disk outside the
     /// app — so an open Settings window can refresh its fields.
     var onExternalChange: (() -> Void)?
+
+    /// Fired when the active profile changes (because the frontmost app changed).
+    /// The tray app uses it to show the active profile in the menu.
+    var onActiveProfileChange: ((_ name: String) -> Void)?
 
     private let lock = NSLock()
     private var lastWrittenJSON: String?     // guarded by `lock`; suppresses self-write reloads
@@ -116,13 +144,53 @@ final class Mapping {
         for e in Mapping.layout { m[e.raw] = e.name }
         idToName = m
 
-        // Seed from defaults so a partial/broken/missing file still mostly works.
-        for (name, cmd) in Mapping.defaults { bindings[name] = cmd }
+        // Seed a default profile from the built-ins so a partial/broken/missing file
+        // still mostly works.
+        profiles = [Profile(name: "default", bundleId: nil, bindings: Mapping.defaultsDict())]
 
         if FileManager.default.fileExists(atPath: path) {
             load()
         } else {
             persist()   // write the default config file on first run
+        }
+    }
+
+    // MARK: - Active-profile selection (manual; cycled by the profile-switch control)
+
+    /// The physical control reserved app-wide to cycle profiles. It never runs a
+    /// bound command in any profile — pressing it advances to the next profile and
+    /// the tray reflects the change. (Chosen: the knob press.)
+    static let profileSwitchControl = "knob-press"
+
+    /// Active index clamped into range. Lock held.
+    private func safeActiveIndexLocked() -> Int {
+        if profiles.isEmpty { return 0 }
+        return min(max(_activeIndex, 0), profiles.count - 1)
+    }
+
+    /// The active profile's display name (for the menu + menu-bar label).
+    var activeProfileName: String { withLock { profiles[safeActiveIndexLocked()].name } }
+
+    /// Advance to the next profile (wrapping), fire `onActiveProfileChange`, and
+    /// return the new active profile name.
+    @discardableResult
+    func cycleProfile() -> String {
+        let name: String = withLock {
+            guard !profiles.isEmpty else { return "default" }
+            _activeIndex = (safeActiveIndexLocked() + 1) % profiles.count
+            return profiles[_activeIndex].name
+        }
+        onActiveProfileChange?(name)
+        return name
+    }
+
+    /// The command the *active* profile binds to `name`, falling through to the
+    /// default profile for keys the active profile doesn't define. nil/"" means
+    /// unmapped/disabled. Exposed for testing the resolution without executing.
+    func activeBinding(for name: String) -> String? {
+        withLock {
+            let active = profiles[safeActiveIndexLocked()]
+            return active.bindings[name] ?? profiles[0].bindings[name]
         }
     }
 
@@ -147,73 +215,175 @@ final class Mapping {
         if withLock({ text == lastWrittenJSON }) { return }  // ignore our own atomic write
         load()
         if let cb = onExternalChange { DispatchQueue.main.async { cb() } }
+        onActiveProfileChange?(activeProfileName)   // active profile may have shifted/dropped
     }
 
     // MARK: - Persistence
 
     private func load() {
         guard let data = FileManager.default.contents(atPath: path),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let b = obj["bindings"] as? [String: String] else { return }
-        withLock { for (name, cmd) in b { bindings[name] = cmd } }
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+
+        // Parse either the current profiles array or the legacy single `bindings` block.
+        var parsed: [(name: String, bundleId: String?, bindings: [String: String])] = []
+        if let arr = obj["profiles"] as? [[String: Any]] {
+            for pd in arr {
+                guard let name = pd["name"] as? String, !name.isEmpty else { continue }
+                let bid = pd["match"] as? String
+                let b = (pd["bindings"] as? [String: String]) ?? [:]
+                parsed.append((name, bid, b))
+            }
+        } else if let b = obj["bindings"] as? [String: String] {
+            parsed.append(("default", nil, b))   // migrate legacy flat format
+        }
+        guard !parsed.isEmpty else { return }
+
+        withLock {
+            let prevName = profiles.isEmpty ? "default" : profiles[safeActiveIndexLocked()].name
+            // The default profile keeps the built-in defaults as a base, with the
+            // file's values merged over it (so a partial/hand-edited file still has
+            // every key). Other profiles are taken as written.
+            var rebuilt: [Profile] = []
+            var def = Profile(name: "default", bundleId: nil, bindings: Mapping.defaultsDict())
+            if let fileDef = parsed.first(where: { $0.name == "default" }) {
+                for (n, c) in fileDef.bindings { def.bindings[n] = c }
+            }
+            rebuilt.append(def)
+            for p in parsed where p.name != "default" {
+                rebuilt.append(Profile(name: p.name, bundleId: p.bundleId, bindings: p.bindings))
+            }
+            profiles = rebuilt
+            _activeIndex = profiles.firstIndex { $0.name == prevName } ?? 0   // keep the active profile if it survived
+        }
     }
 
-    /// Write the current bindings to the JSON file, in physical-layout order, with
-    /// the explanatory note. Hand-rolled rather than JSONSerialization so the file
-    /// stays human-friendly (stable order + the `_note`).
+    /// Write all profiles to the JSON file, in physical-layout order, with the
+    /// explanatory note. Hand-rolled rather than JSONSerialization so the file stays
+    /// human-friendly (stable order + the `_note`).
     private func persist() {
         let dir = (path as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let snap = withLock { bindings }
+        let snap = withLock { profiles }
         func esc(_ s: String) -> String {
             s.replacingOccurrences(of: "\\", with: "\\\\")
              .replacingOccurrences(of: "\"", with: "\\\"")
         }
-        var lines: [String] = []
-        for name in Mapping.order {
-            lines.append("    \"\(name)\": \"\(esc(snap[name] ?? ""))\"")
+        func block(_ p: Profile) -> String {
+            var head = "    {\n      \"name\": \"\(esc(p.name))\""
+            if let bid = p.bundleId, !bid.isEmpty {
+                head += ",\n      \"match\": \"\(esc(bid))\""
+            }
+            var lines: [String] = []
+            for name in Mapping.order {
+                lines.append("        \"\(name)\": \"\(esc(p.bindings[name] ?? ""))\"")
+            }
+            return head + ",\n      \"bindings\": {\n" + lines.joined(separator: ",\n") + "\n      }\n    }"
         }
+        let body = snap.map(block).joined(separator: ",\n")
         let json = """
         {
           "_note": "\(esc(Mapping.configNote))",
-          "bindings": {
-        \(lines.joined(separator: ",\n"))
-          }
+          "profiles": [
+        \(body)
+          ]
         }
         """
         withLock { lastWrittenJSON = json }
         try? json.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - Read/write API for the Settings window
+    /// Ensure exactly one `default` profile exists and sits at index 0. Lock held.
+    private func ensureDefaultFirstLocked() {
+        if let i = profiles.firstIndex(where: { $0.name == "default" }) {
+            if i != 0 { let d = profiles.remove(at: i); profiles.insert(d, at: 0) }
+        } else {
+            profiles.insert(Profile(name: "default", bundleId: nil, bindings: Mapping.defaultsDict()), at: 0)
+        }
+    }
 
-    /// Current bindings in physical-layout order (missing keys yield "").
-    func current() -> [(name: String, cmd: String)] {
-        let snap = withLock { bindings }
+    // MARK: - Profile read/write API for the Settings window
+
+    /// Profile names + their app match, default first.
+    func profileSummaries() -> [(name: String, bundleId: String?)] {
+        withLock { profiles.map { ($0.name, $0.bundleId) } }
+    }
+
+    /// One profile's bindings in physical-layout order (missing keys yield "").
+    func bindings(forProfile name: String) -> [(name: String, cmd: String)] {
+        let snap = withLock { profiles.first(where: { $0.name == name })?.bindings ?? [:] }
         return Mapping.order.map { ($0, snap[$0] ?? "") }
     }
 
-    /// Replace the given bindings, persist to disk, and apply live.
+    /// Replace the entire profile set in one shot (one disk write), then apply live.
+    /// Used by the Settings window's Save so multiple profiles can't race the watcher.
+    func replaceAllProfiles(_ list: [(name: String, bundleId: String?, bindings: [String: String])]) {
+        let newName: String = withLock {
+            let prevName = profiles.isEmpty ? "default" : profiles[safeActiveIndexLocked()].name
+            profiles = list.map { Profile(name: $0.name, bundleId: $0.bundleId, bindings: $0.bindings) }
+            ensureDefaultFirstLocked()
+            _activeIndex = profiles.firstIndex { $0.name == prevName } ?? 0   // keep active profile if it survived
+            return profiles[_activeIndex].name
+        }
+        persist()
+        onActiveProfileChange?(newName)
+    }
+
+    /// Add a profile (seeded as a copy of the default bindings) bound to `bundleId`.
+    /// No-op if the name is empty/"default"/already taken. Persists + applies live.
+    @discardableResult
+    func addProfile(named name: String, bundleId: String?) -> Bool {
+        let ok: Bool = withLock {
+            guard !name.isEmpty, name != "default",
+                  !profiles.contains(where: { $0.name == name }) else { return false }
+            let seed = profiles[0].bindings
+            profiles.append(Profile(name: name, bundleId: bundleId, bindings: seed))
+            return true
+        }
+        if ok { persist() }
+        return ok
+    }
+
+    /// Remove a profile by name (the `default` profile cannot be removed).
+    func removeProfile(_ name: String) {
+        guard name != "default" else { return }
+        let removed: Bool = withLock {
+            let before = profiles.count
+            profiles.removeAll { $0.name == name }
+            return profiles.count != before
+        }
+        if removed { persist() }
+    }
+
+    // MARK: - Default-profile convenience (back-compat / tests)
+
+    /// The default profile's bindings in physical-layout order.
+    func current() -> [(name: String, cmd: String)] { bindings(forProfile: "default") }
+
+    /// Merge into the default profile, persist, and apply live.
     func update(_ newBindings: [String: String]) {
-        withLock { for (name, cmd) in newBindings { bindings[name] = cmd } }
+        withLock { for (name, cmd) in newBindings { profiles[0].bindings[name] = cmd } }
         persist()
     }
 
-    /// Restore every key to its built-in default, persist, and apply live.
+    /// Restore the default profile to its built-in bindings, persist, apply live.
     func resetToDefaults() {
-        withLock {
-            bindings.removeAll()
-            for (name, cmd) in Mapping.defaults { bindings[name] = cmd }
-        }
+        withLock { profiles[0].bindings = Mapping.defaultsDict() }
         persist()
     }
 
     // MARK: - Dispatch
 
-    /// Run the command bound to the control whose raw HID id is `rawID`.
+    /// Run the command the active profile binds to the control whose raw HID id is `rawID`.
     func dispatch(_ rawID: String) {
         guard let name = idToName[rawID] else { return }
-        let cmd = withLock { bindings[name] }
+        // The profile-switch control is reserved app-wide: it cycles profiles and
+        // never runs a bound command. In Listen mode it still reports so an open
+        // Settings window can locate it.
+        if name == Mapping.profileSwitchControl {
+            if identifyMode { onControl?(name, nil, false) } else { cycleProfile() }
+            return
+        }
+        let cmd = activeBinding(for: name)
         let willRun = !identifyMode && (cmd?.isEmpty == false)
         onControl?(name, cmd, willRun)
         guard willRun, let cmd = cmd else { return }
