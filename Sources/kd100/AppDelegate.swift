@@ -76,15 +76,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.onHealth = { [weak self] health in
             DispatchQueue.main.async { self?.apply(health) }
         }
-        engine.mapping.onFire = { [weak self] name, cmd in
+        engine.mapping.onControl = { [weak self] name, cmd, executed in
             DispatchQueue.main.async {
-                if let cmd = cmd, !cmd.isEmpty {
-                    self?.lastFireLine.title = "Last: \(name) → \(cmd)"
-                } else {
+                self?.settings?.controlFired(name)   // flash the key in an open Settings window
+                if executed {
+                    self?.lastFireLine.title = "Last: \(name) → \(cmd ?? "")"
+                } else if (cmd?.isEmpty ?? true) {
                     self?.lastFireLine.title = "Last: \(name) (unmapped)"
                 }
+                // identify mode with a mapped command: leave the menu line as-is.
             }
         }
+        engine.mapping.onResult = { [weak self] name, code, tail in
+            guard code != 0 else { return }   // only surface failures
+            DispatchQueue.main.async {
+                let short = tail.split(separator: "\n").last.map(String.init) ?? ""
+                self?.lastFireLine.title = "Last: \(name) → failed (\(code))"
+                    + (short.isEmpty ? "" : ": \(short)")
+                NSLog("KD100: '\(name)' exited \(code)\(tail.isEmpty ? "" : ": \(tail)")")
+            }
+        }
+        engine.mapping.onExternalChange = { [weak self] in
+            self?.settings?.reloadFromMapping()
+        }
+        engine.mapping.startWatching()
     }
 
     private func apply(_ health: KD100.Health) {

@@ -31,10 +31,9 @@ final class KD100 {
     private var manager: IOHIDManager!
     private var buffers: [UnsafeMutablePointer<UInt8>] = []
 
-    // Edge-detection state so each press fires once (ignore key-up + auto-repeat).
-    private var kbIdle = true
-    private var ccIdle = true
-    private var knobButtonDown = false
+    // Pure decoder: HID report → control id(s), with press edge-detection so each
+    // press fires once (key-up + auto-repeat filtered). See Decode.swift.
+    private var decoder = ReportDecoder()
 
     init(mode: Mode) {
         self.mode = mode
@@ -142,40 +141,8 @@ final class KD100 {
     private func dispatchValue(page: Int, usage: Int, value: Int) {}
 
     private func dispatchReport(id: Int, bytes: [UInt8]) {
-        switch id {
-        case 3: // keyboard boot report: [id][modifier][reserved][keycode]...
-            let mod = bytes.count > 1 ? bytes[1] : 0
-            let key = bytes.count > 2 ? bytes[2] : 0
-            if mod == 0 && key == 0 { kbIdle = true; return }
-            if kbIdle {
-                kbIdle = false
-                mapping.dispatch(String(format: "kb:%02x:%02x", mod, key))
-            }
-
-        case 1: // consumer report: [id][usage]
-            let usage = bytes.count > 1 ? bytes[1] : 0
-            if usage == 0 { ccIdle = true; return }
-            if ccIdle {
-                ccIdle = false
-                mapping.dispatch(String(format: "cc:%02x", usage))
-            }
-
-        case 17: // vendor/knob report: [id][buttons][delta]...
-            let b1 = bytes.count > 1 ? bytes[1] : 0
-            let delta = bytes.count > 2 ? Int(Int8(bitPattern: bytes[2])) : 0
-            if delta != 0 {
-                mapping.dispatch(delta > 0 ? "dial:cw" : "dial:ccw")
-            }
-            let pressed = (b1 & 0x01) != 0   // button1 bit; 0x02 is the touch bit (ignored)
-            if pressed && !knobButtonDown {
-                knobButtonDown = true
-                mapping.dispatch("dial:press")
-            } else if !pressed {
-                knobButtonDown = false
-            }
-
-        default:
-            break
+        for rawID in decoder.decode(reportID: id, bytes: bytes) {
+            mapping.dispatch(rawID)
         }
     }
 }

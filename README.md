@@ -7,9 +7,11 @@ Huion's driver**. A small menu-bar app opens the device over IOKit, **seizes** i
 including the **knob**, and runs the command you bound to it.
 
 It ships with [AeroSpace](https://github.com/nikitabobko/AeroSpace) window-manager
-bindings as the **default example**, but each binding is just a `/bin/sh` line —
-rebind any key to `open -a …`, `osascript`, a script, anything — from the Settings
-window.
+bindings as the **default example**, but each binding is just a shell command run
+through your **login shell** (`$SHELL -ilc`, so it sees the same `PATH`/tools a
+Terminal does) — rebind any key to `open -a …`, `osascript`, a `uv`/mise-managed
+script, anything — from the Settings window. A failing command's exit code and
+stderr surface in the menu instead of vanishing.
 
 ## Why this exists
 
@@ -57,16 +59,23 @@ it's a menu-bar (accessory) app.
 The menu bar icon's menu shows:
 
 - **Live status** — `● Keypad connected` / `○ Waiting for keypad…` / a permission or
-  busy warning, plus the last control you pressed and the command it ran.
-- **Settings…** (⌘,) — a window with one editable field per physical key + knob action.
-  Type a command, hit **Save**, and it applies immediately (no restart). Leave a field
-  blank to disable that key. **Reset to Defaults** restores the AeroSpace example set.
+  busy warning, plus the last control you pressed and the command it ran (or
+  `→ failed (code)` with the error if it didn't).
+- **Settings…** (⌘,) — a window with:
+  - a **visual device map** of the pad (rows 4/4/4/4/2 + knob) — click a key to jump to
+    its command field;
+  - a **Listen** toggle — flip it on and press a key on the pad to locate it in the list
+    (commands are paused while listening, so you won't trigger anything);
+  - one editable field per physical key + knob action, each with a **▶ test** button that
+    runs the current command immediately and reports the result;
+  - **Save** applies everything live (no restart); blank = disabled key; **Reset to
+    Defaults** restores the AeroSpace example set.
 - **Open at Login** — register/unregister as a login item (macOS 13+).
 - **Quit KD100**.
 
 Bindings are stored in `~/.config/kd100/mapping.json` (created on first run), keyed by
-**human key names** → shell command. You can edit it by hand too (relaunch the app to
-pick up hand edits):
+**human key names** → shell command. You can edit it by hand too — the app watches the
+file and **picks up hand edits live** (no relaunch):
 
 ```jsonc
 "bindings": {
@@ -101,7 +110,14 @@ knob-cw   knob-ccw   knob-press
   maps those names → commands. The cryptic ids never reach the config file.
 - **HID protocol:** buttons = report id 3 (keyboard) + id 1 (consumer); knob = vendor
   report id 17 — `byte2` is a signed delta (`+1` CW / `0xff` CCW), press = `byte1`
-  bit `0x01`.
+  bit `0x01`. Decoding + press edge-detection live in a pure `ReportDecoder`
+  (`Decode.swift`) with no IOKit dependency, so they're unit-tested without hardware.
+- **Execution:** commands run via `$SHELL -ilc` on a background queue; a
+  `terminationHandler` captures exit status + stderr (filtering the harmless
+  interactive-zsh `zle` warnings) without blocking, so failures surface and a
+  backgrounded command can't pin a thread.
+- **Live config:** a `DispatchSource` file watcher (`FileWatcher.swift`, re-arms across
+  atomic-write inode swaps) reloads `mapping.json` when it changes on disk.
 - **Packaging:** ships as a signed, notarized `kd100.app` with `LSUIElement` so it
   runs as a menu-bar accessory; the Input Monitoring grant attaches to the stable code
   signature.
@@ -109,12 +125,18 @@ knob-cw   knob-ccw   knob-press
 ## Layout
 
 - `Sources/kd100/main.swift` — entry / arg parsing (`app` | `run` | `capture`).
-- `Sources/kd100/KD100.swift` — IOKit HID open/seize, callbacks, edge-detected
-  dispatch, connection-health hooks.
-- `Sources/kd100/Mapping.swift` — layout table, config load/save, live command dispatch.
+- `Sources/kd100/KD100.swift` — IOKit HID open/seize, callbacks, connection-health hooks.
+- `Sources/kd100/Decode.swift` — pure `ReportDecoder` (HID report → control id + press
+  edge-detection); no IOKit, fully unit-tested.
+- `Sources/kd100/Mapping.swift` — layout table, config load/save + live file watch,
+  login-shell command dispatch with exit/stderr capture.
+- `Sources/kd100/FileWatcher.swift` — `DispatchSource` config-file watcher.
 - `Sources/kd100/AppDelegate.swift` — menu-bar status item, menu, engine wiring.
-- `Sources/kd100/SettingsWindow.swift` — the key→command editor window.
+- `Sources/kd100/SettingsWindow.swift` — the editor window: device map, Listen mode,
+  per-key test-fire.
 - `Sources/kd100/StatusIcon.swift` — the menu-bar dial icon.
+- `Tests/kd100Tests/` — decoder, config round-trip, shell-execution, and Settings-build
+  tests (`swift test`).
 - `scripts/install.sh` — build + sign + install the app (or a headless agent for
   `run`/`capture`).
 - `release.sh` + `.github/workflows/release.yml` — tag `v*` → universal build, sign,

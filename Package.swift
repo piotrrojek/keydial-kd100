@@ -14,6 +14,11 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("ServiceManagement"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "kd100Tests",
+            dependencies: ["kd100"],
+            path: "Tests/kd100Tests"
+        ),
     ]
 )
