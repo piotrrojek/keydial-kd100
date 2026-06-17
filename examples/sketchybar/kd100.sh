@@ -33,6 +33,8 @@ ROW_FONT="JetBrainsMono Nerd Font:Semibold:$F12"
 # (e.g. "ctrader.sh POST chart/tf/M1") rather than a path that truncates away the
 # meaningful tail. Quoted in the patterns below so $HOME stays literal text.
 SCRIPTS_LIT='$HOME/.config/kd100/scripts/'
+# literal tilde is an intentional display-strip pattern, not a path to expand
+# shellcheck disable=SC2088
 SCRIPTS_TILDE='~/.config/kd100/scripts/'
 
 # Physical layout order (rows 4/4/4/4/2 + knob), so the cheat-sheet maps to the pad.
