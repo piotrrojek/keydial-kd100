@@ -26,9 +26,9 @@ enum Theme {
     // MARK: - Metrics (8pt grid)
 
     static let unit: CGFloat = 8
-    static let panelRadius: CGFloat = 18
-    static let keycapRadius: CGFloat = 9
-    static let pad: CGFloat = 18
+    static let panelRadius: CGFloat = 22
+    static let keycapRadius: CGFloat = 11
+    static let pad: CGFloat = 26
 
     // MARK: - Type
 

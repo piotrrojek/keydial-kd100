@@ -20,14 +20,15 @@ final class DeviceView: NSView {
         ("0", 0, 4, 2, 1), ("dot", 2, 4, 1, 1),
     ]
 
-    private let capW: CGFloat = 54, capH: CGFloat = 44, gap: CGFloat = 8
-    private let bandH: CGFloat = 54
-    private var gridW: CGFloat { 4 * capW + 3 * gap }                 // 240
-    private var keysTop: CGFloat { bandH + 14 }                       // 68
-    private var legendTop: CGFloat { keysTop + 5 * capH + 4 * gap + 12 }
+    private let capW: CGFloat = 64, capH: CGFloat = 54, gap: CGFloat = 12
+    private let bandH: CGFloat = 68
+    private var gridW: CGFloat { 4 * capW + 3 * gap }                 // 292
+    private var keysTop: CGFloat { bandH + 20 }                       // 88
+    private var legendTop: CGFloat { keysTop + 5 * capH + 4 * gap + 18 }
 
-    /// Natural size of the rendered device (callers pad around it).
-    static let preferredSize = NSSize(width: 240, height: 54 + 14 + 5 * 44 + 4 * 8 + 12 + 18)
+    /// Natural size of the rendered device (callers pad around it). Width = gridW;
+    /// height = keysTop + 5·capH + 4·gap + legend gap + legend + bottom margin.
+    static let preferredSize = NSSize(width: 292, height: 462)
 
     private var profile: String
     private var tint: NSColor
@@ -107,7 +108,7 @@ final class DeviceView: NSView {
         NSGradient(starting: Theme.bandHi, ending: Theme.bandLo)?.draw(in: band, angle: -90)
         NSGraphicsContext.restoreGraphicsState()
 
-        drawDial(center: NSPoint(x: 36, y: bandH / 2), radius: 19)
+        drawDial(center: NSPoint(x: 44, y: bandH / 2), radius: 24)
         drawProfileName(in: band)
 
         for f in capFrames { drawCap(name: f.name, in: f.rect) }
@@ -126,20 +127,20 @@ final class DeviceView: NSView {
     }
 
     private func drawProfileName(in band: NSRect) {
-        let rightPad: CGFloat = 14
+        let rightPad: CGFloat = 18
         let cap = "kd100" as NSString
         let capAttr: [NSAttributedString.Key: Any] = [
-            .font: Theme.ui(10, .bold), .foregroundColor: NSColor(white: 0.32, alpha: 1),
+            .font: Theme.ui(11, .bold), .foregroundColor: NSColor(white: 0.32, alpha: 1),
         ]
         let onMetal = tint.blended(withFraction: 0.45, of: .black) ?? tint
         let name = profile as NSString
         let nameAttr: [NSAttributedString.Key: Any] = [
-            .font: Theme.ui(15, .heavy), .foregroundColor: onMetal,
+            .font: Theme.ui(17, .heavy), .foregroundColor: onMetal,
         ]
         let capSize = cap.size(withAttributes: capAttr)
         let nameSize = name.size(withAttributes: nameAttr)
-        cap.draw(at: NSPoint(x: band.maxX - rightPad - capSize.width, y: band.midY - 18), withAttributes: capAttr)
-        name.draw(at: NSPoint(x: band.maxX - rightPad - nameSize.width, y: band.midY - 2), withAttributes: nameAttr)
+        cap.draw(at: NSPoint(x: band.maxX - rightPad - capSize.width, y: band.midY - 24), withAttributes: capAttr)
+        name.draw(at: NSPoint(x: band.maxX - rightPad - nameSize.width, y: band.midY - 4), withAttributes: nameAttr)
     }
 
     private func drawCap(name: String, in r: NSRect) {
@@ -164,10 +165,10 @@ final class DeviceView: NSView {
         path.stroke()
 
         let glyphAttr: [NSAttributedString.Key: Any] = [
-            .font: Theme.mono(9, .semibold),
+            .font: Theme.mono(10, .semibold),
             .foregroundColor: isFlash ? NSColor.black.withAlphaComponent(0.65) : Theme.keyFaint,
         ]
-        (Theme.keyGlyph(name) as NSString).draw(at: NSPoint(x: r.minX + 7, y: r.minY + 5), withAttributes: glyphAttr)
+        (Theme.keyGlyph(name) as NSString).draw(at: NSPoint(x: r.minX + 9, y: r.minY + 7), withAttributes: glyphAttr)
 
         let label = Theme.prettyBinding(cmd)
         guard !label.isEmpty else { return }
@@ -175,11 +176,11 @@ final class DeviceView: NSView {
         para.alignment = .center
         para.lineBreakMode = .byTruncatingTail
         let attr: [NSAttributedString.Key: Any] = [
-            .font: Theme.mono(9, .medium),
+            .font: Theme.mono(11, .medium),
             .foregroundColor: isFlash ? NSColor.black.withAlphaComponent(0.85) : Theme.keyText,
             .paragraphStyle: para,
         ]
-        let textRect = NSRect(x: r.minX + 4, y: r.minY + r.height / 2 - 8, width: r.width - 8, height: r.height / 2)
+        let textRect = NSRect(x: r.minX + 5, y: r.minY + r.height / 2 - 9, width: r.width - 10, height: r.height / 2)
         (label as NSString).draw(in: textRect, withAttributes: attr)
     }
 
@@ -191,8 +192,8 @@ final class DeviceView: NSView {
         para.alignment = .center
         para.lineBreakMode = .byTruncatingTail
         let attr: [NSAttributedString.Key: Any] = [
-            .font: Theme.mono(9, .medium), .foregroundColor: Theme.keyFaint, .paragraphStyle: para,
+            .font: Theme.mono(11, .medium), .foregroundColor: Theme.keyFaint, .paragraphStyle: para,
         ]
-        (line as NSString).draw(in: NSRect(x: 4, y: legendTop, width: gridW - 8, height: 16), withAttributes: attr)
+        (line as NSString).draw(in: NSRect(x: 8, y: legendTop, width: gridW - 16, height: 20), withAttributes: attr)
     }
 }

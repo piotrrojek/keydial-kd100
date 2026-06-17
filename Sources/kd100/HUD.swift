@@ -117,11 +117,11 @@ final class HUDController {
     /// Compact chip for the profile-switch flash: dial glyph + profile name in the
     /// profile tint, on the dark vibrant card.
     private func makeChip(profile: String, tint: NSColor) -> NSView {
-        let h: CGFloat = 56
-        let v = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: h))
+        let h: CGFloat = 68
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: h))
 
-        let dial = NSImageView(frame: NSRect(x: 12, y: h / 2 - 16, width: 32, height: 32))
-        let cfg = NSImage.SymbolConfiguration(pointSize: 26, weight: .regular)
+        let dial = NSImageView(frame: NSRect(x: 16, y: h / 2 - 19, width: 38, height: 38))
+        let cfg = NSImage.SymbolConfiguration(pointSize: 30, weight: .regular)
         dial.image = NSImage(systemSymbolName: "dial.medium.fill", accessibilityDescription: "kd100")?
             .withSymbolConfiguration(cfg)
         dial.contentTintColor = tint
@@ -129,13 +129,13 @@ final class HUDController {
         v.addSubview(dial)
 
         let label = NSTextField(labelWithString: profile)
-        label.font = Theme.ui(20, .semibold)
+        label.font = Theme.ui(22, .semibold)
         label.textColor = tint
         label.sizeToFit()
-        label.frame.origin = NSPoint(x: 52, y: h / 2 - label.frame.height / 2)
+        label.frame.origin = NSPoint(x: 62, y: h / 2 - label.frame.height / 2)
         v.addSubview(label)
 
-        v.frame.size.width = max(160, 52 + label.frame.width + 18)
+        v.frame.size.width = max(200, 62 + label.frame.width + 24)
         return v
     }
 }
