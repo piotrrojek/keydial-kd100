@@ -62,7 +62,7 @@ The menu bar icon's menu shows:
   busy warning, plus the last control you pressed and the command it ran (or
   `→ failed (code)` with the error if it didn't).
 - **Settings…** (⌘,) — a window with:
-  - a **profile picker** + **Add for App…** / **Remove** — each profile is a named binding
+  - a **profile picker** + **Add Profile…** / **Remove** — each profile is a named binding
     set (see [Profiles](#profiles));
   - a **visual device map** of the pad (rows 4/4/4/4/2 + knob) — click a key to jump to
     its command field;
@@ -87,7 +87,7 @@ by hand too — the app watches the file and **picks up hand edits live** (no re
         "knob-cw": "aerospace resize smart +50",
         "minus": "osascript -e 'display notification \"hi\"'"
     } },
-    { "name": "cTrader", "match": "com.spotware.ctmac", "bindings": {
+    { "name": "cTrader", "bindings": {
         "1": "open -a 'Mission Control'"
     } }
   ]
@@ -107,10 +107,10 @@ knob-cw   knob-ccw   knob-press
 
 ## Profiles
 
-A **profile** is a named binding set. There's always a `default`; add more (e.g. one
-per app) from Settings → **Add for App…**, which seeds a copy of `default`. A profile
-only needs to list the keys that differ — anything it doesn't define **falls through to
-`default`**, and a key set to `""` is disabled in that profile.
+A **profile** is a named binding set. There's always a `default`; add more from
+Settings → **Add Profile…**, which seeds a copy of `default`. A profile only needs to
+list the keys that differ — anything it doesn't define **falls through to `default`**,
+and a key set to `""` is disabled in that profile.
 
 **Switch profiles with the knob press.** It's reserved app-wide to cycle
 `default → … → default` (so it can't be bound to a command in any profile), and the

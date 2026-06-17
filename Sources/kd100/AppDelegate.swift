@@ -118,14 +118,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// default — the profile name next to the menu-bar dial icon. The knob press
     /// cycles profiles (Mapping reserves that control), which drives this callback.
     private func updateProfileLine(_ name: String) {
-        let multi = engine.mapping.profileSummaries().count > 1
+        let multi = engine.mapping.profileNames().count > 1
         profileLine.isHidden = !multi
         profileLine.title = "Profile: \(name)"
         if let button = statusItem.button {
             button.imagePosition = .imageLeading
             button.title = (name == "default") ? "" : " \(name)"
         }
-        status.setProfiles(active: name, all: engine.mapping.profileSummaries().map(\.name))
+        status.setProfiles(active: name, all: engine.mapping.profileNames())
     }
 
     private func apply(_ health: KD100.Health) {

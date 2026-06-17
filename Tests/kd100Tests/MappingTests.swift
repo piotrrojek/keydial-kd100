@@ -83,7 +83,7 @@ final class MappingTests: XCTestCase {
         XCTAssertEqual(Mapping.cleanStderr("(eval):1: can't change option: zle\n"), "")
     }
 
-    // MARK: - Per-app profiles
+    // MARK: - Profiles
 
     func testLegacyFlatFormatMigrates() throws {
         // An old-style single-set file (no `profiles` key) loads as the default profile.
@@ -97,11 +97,29 @@ final class MappingTests: XCTestCase {
         XCTAssertEqual(cur["knob-cw"], "aerospace resize smart +50")
     }
 
+    func testLegacyMatchKeyIsIgnoredAndDroppedOnSave() throws {
+        // Files from the retired per-app-switching design carried a "match" bundle id.
+        // It must load fine (the key is simply ignored) and never be written back.
+        let legacy = #"{ "profiles": [ { "name": "default", "bindings": { "1": "echo one" } }, { "name": "cTrader", "match": "com.spotware.ctmac", "bindings": { "1": "echo ct" } } ] }"#
+        try legacy.write(toFile: configPath, atomically: true, encoding: .utf8)
+        let m = Mapping(path: configPath)
+        XCTAssertEqual(m.profileNames(), ["default", "cTrader"])
+        let b = Dictionary(uniqueKeysWithValues: m.bindings(forProfile: "cTrader").map { ($0.name, $0.cmd) })
+        XCTAssertEqual(b["1"], "echo ct")
+        // A write (round-trip the current profiles) must not re-emit "match".
+        m.replaceAllProfiles(m.profileNames().map { n in
+            (n, Dictionary(uniqueKeysWithValues: m.bindings(forProfile: n).map { ($0.name, $0.cmd) }))
+        })
+        let text = try String(contentsOfFile: configPath, encoding: .utf8)
+        XCTAssertFalse(text.contains("\"match\""))
+        XCTAssertFalse(text.contains("com.spotware.ctmac"))
+    }
+
     func testCycleProfileSelectsActiveBindings() {
         let m = Mapping(path: configPath)
         m.replaceAllProfiles([
-            ("default", nil, Mapping.defaultsDict()),
-            ("Term", "com.apple.Terminal", ["1": "echo term-one"]),   // only overrides key 1
+            ("default", Mapping.defaultsDict()),
+            ("Term", ["1": "echo term-one"]),   // only overrides key 1
         ])
 
         // Starts on default.
@@ -121,7 +139,7 @@ final class MappingTests: XCTestCase {
 
     func testKnobPressDispatchCyclesProfileInsteadOfRunning() {
         let m = Mapping(path: configPath)
-        m.addProfile(named: "T", bundleId: "com.t")   // [default, T]
+        m.addProfile(named: "T")   // [default, T]
         XCTAssertEqual(Mapping.profileSwitchControl, "knob-press")
         XCTAssertEqual(m.activeProfileName, "default")
         m.dispatch("dial:press")                       // raw HID id for knob-press
@@ -132,35 +150,34 @@ final class MappingTests: XCTestCase {
 
     func testAddProfileRejectsDuplicateAndReservedName() {
         let m = Mapping(path: configPath)
-        XCTAssertTrue(m.addProfile(named: "A", bundleId: "com.a"))
-        XCTAssertFalse(m.addProfile(named: "A", bundleId: "com.a2"))    // duplicate name
-        XCTAssertFalse(m.addProfile(named: "default", bundleId: nil))   // reserved
-        XCTAssertEqual(m.profileSummaries().count, 2)
+        XCTAssertTrue(m.addProfile(named: "A"))
+        XCTAssertFalse(m.addProfile(named: "A"))         // duplicate name
+        XCTAssertFalse(m.addProfile(named: "default"))   // reserved
+        XCTAssertEqual(m.profileNames().count, 2)
     }
 
     func testRemoveProfilePersistsAndDefaultIsProtected() {
         let m = Mapping(path: configPath)
-        m.addProfile(named: "A", bundleId: "com.a")
+        m.addProfile(named: "A")
         m.removeProfile("default")   // ignored — default can't be removed
-        XCTAssertTrue(m.profileSummaries().contains { $0.name == "default" })
+        XCTAssertTrue(m.profileNames().contains("default"))
         m.removeProfile("A")
-        XCTAssertEqual(m.profileSummaries().count, 1)
+        XCTAssertEqual(m.profileNames().count, 1)
         // Persisted: a fresh instance reading the same file agrees.
         let m2 = Mapping(path: configPath)
-        XCTAssertEqual(m2.profileSummaries().count, 1)
+        XCTAssertEqual(m2.profileNames().count, 1)
     }
 
     func testProfilesRoundTripThroughDisk() {
         let m = Mapping(path: configPath)
         m.replaceAllProfiles([
-            ("default", nil, Mapping.defaultsDict()),
-            ("cTrader", "com.spotware.ctrader", ["1": "echo ct", "knob-cw": ""]),
+            ("default", Mapping.defaultsDict()),
+            ("cTrader", ["1": "echo ct", "knob-cw": ""]),
         ])
         let m2 = Mapping(path: configPath)
-        let sums = m2.profileSummaries()
-        XCTAssertEqual(sums.count, 2)
-        XCTAssertEqual(sums.last?.name, "cTrader")
-        XCTAssertEqual(sums.last?.bundleId, "com.spotware.ctrader")
+        let names = m2.profileNames()
+        XCTAssertEqual(names.count, 2)
+        XCTAssertEqual(names.last, "cTrader")
         let b = Dictionary(uniqueKeysWithValues: m2.bindings(forProfile: "cTrader").map { ($0.name, $0.cmd) })
         XCTAssertEqual(b["1"], "echo ct")
         XCTAssertEqual(b["knob-cw"], "")   // explicit disable preserved across round-trip
@@ -168,15 +185,15 @@ final class MappingTests: XCTestCase {
 
     func testReplaceAllProfilesAlwaysKeepsDefaultFirst() {
         let m = Mapping(path: configPath)
-        m.replaceAllProfiles([("X", "com.x", ["1": "echo x"])])   // default omitted
-        let sums = m.profileSummaries()
-        XCTAssertEqual(sums.first?.name, "default")   // re-inserted at the front
-        XCTAssertTrue(sums.contains { $0.name == "X" })
+        m.replaceAllProfiles([("X", ["1": "echo x"])])   // default omitted
+        let names = m.profileNames()
+        XCTAssertEqual(names.first, "default")   // re-inserted at the front
+        XCTAssertTrue(names.contains("X"))
     }
 
     func testCycleProfileFiresCallback() {
         let m = Mapping(path: configPath)
-        m.addProfile(named: "T", bundleId: "com.t")   // [default, T]
+        m.addProfile(named: "T")   // [default, T]
         var fired: [String] = []
         m.onActiveProfileChange = { fired.append($0) }
         XCTAssertEqual(m.cycleProfile(), "T")          // default -> T

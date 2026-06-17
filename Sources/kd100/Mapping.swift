@@ -6,10 +6,9 @@ import Foundation
 ///  1. `layout` — fixed, device-specific table: raw HID id → human key name.
 ///     The raw ids come from the HID report (`kb:MM:KK` keyboard, `cc:UU` consumer,
 ///     `dial:*` knob). This never changes for a given KD100.
-///  2. **Profiles** — a `default` profile plus optional app-specific profiles, each
-///     matched to a frontmost-app bundle id. The active profile is chosen
-///     automatically from whatever app is frontmost (`setActiveContext(bundleId:)`),
-///     so the pad means different things in different apps with zero key-presses.
+///  2. **Profiles** — a `default` profile plus optional named profiles. Switching is
+///     **manual**: the knob press cycles to the next profile (`cycleProfile()`). There
+///     is no automatic / frontmost-app switching — the user drives it explicitly.
 ///  3. `~/.config/kd100/mapping.json` — user-editable, keyed by the **human names**
 ///     → shell command, grouped per profile. The menu-bar app's Settings window
 ///     edits this file and applies changes live (no restart). Hand-edits are also
@@ -85,12 +84,11 @@ final class Mapping {
         Dictionary(uniqueKeysWithValues: Mapping.defaults.map { ($0.name, $0.cmd) })
     }
 
-    static let configNote = "Per-app profiles: \"default\" is used unless the frontmost app matches another profile's \"match\" (its bundle id). Within a profile, key = KD100 physical key (numlock slash star minus / 7 8 9 plus-upper / 4 5 6 plus-lower / 1 2 3 enter / 0 dot / knob-cw knob-ccw knob-press); value = shell command run via your login shell ($SHELL -ilc). A key omitted from a profile falls through to \"default\"; a key set to \"\" is disabled there. Edit in the menu-bar app's Settings window (applies live), or edit here — changes are picked up live."
+    static let configNote = "Profiles: \"default\" plus any named profiles you add. Switch between them manually with the knob press — it cycles default -> next -> default and is reserved app-wide, so it never runs a command. Within a profile, key = KD100 physical key (numlock slash star minus / 7 8 9 plus-upper / 4 5 6 plus-lower / 1 2 3 enter / 0 dot / knob-cw knob-ccw knob-press); value = shell command run via your login shell ($SHELL -ilc). A key omitted from a profile falls through to \"default\"; a key set to \"\" is disabled there. Edit in the menu-bar app's Settings window (applies live), or edit here — changes are picked up live."
 
-    /// One binding set, optionally bound to a frontmost-app bundle id.
+    /// One named binding set. Profiles are cycled manually by the knob press.
     private struct Profile {
         var name: String            // display name + JSON key; "default" is reserved/required
-        var bundleId: String?       // frontmost-app match; nil for "default"
         var bindings: [String: String]   // human name -> command
     }
 
@@ -98,7 +96,7 @@ final class Mapping {
     /// Profiles, guarded by `lock`. `profiles[0]` is always the `default` profile.
     private var profiles: [Profile] = []
     /// Index of the manually-selected active profile (guarded by `lock`). Advanced by
-    /// the profile-switch control; there is no automatic frontmost-app switching.
+    /// the profile-switch control (the knob press).
     private var _activeIndex = 0
     let path: String
 
@@ -117,7 +115,7 @@ final class Mapping {
     /// app — so an open Settings window can refresh its fields.
     var onExternalChange: (() -> Void)?
 
-    /// Fired when the active profile changes (because the frontmost app changed).
+    /// Fired when the active profile changes (the knob press cycled to it).
     /// The tray app uses it to show the active profile in the menu.
     var onActiveProfileChange: ((_ name: String) -> Void)?
 
@@ -146,7 +144,7 @@ final class Mapping {
 
         // Seed a default profile from the built-ins so a partial/broken/missing file
         // still mostly works.
-        profiles = [Profile(name: "default", bundleId: nil, bindings: Mapping.defaultsDict())]
+        profiles = [Profile(name: "default", bindings: Mapping.defaultsDict())]
 
         if FileManager.default.fileExists(atPath: path) {
             load()
@@ -225,16 +223,16 @@ final class Mapping {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         // Parse either the current profiles array or the legacy single `bindings` block.
-        var parsed: [(name: String, bundleId: String?, bindings: [String: String])] = []
+        var parsed: [(name: String, bindings: [String: String])] = []
         if let arr = obj["profiles"] as? [[String: Any]] {
             for pd in arr {
                 guard let name = pd["name"] as? String, !name.isEmpty else { continue }
-                let bid = pd["match"] as? String
+                // A legacy "match" key (from the retired per-app-switching design) is ignored.
                 let b = (pd["bindings"] as? [String: String]) ?? [:]
-                parsed.append((name, bid, b))
+                parsed.append((name, b))
             }
         } else if let b = obj["bindings"] as? [String: String] {
-            parsed.append(("default", nil, b))   // migrate legacy flat format
+            parsed.append(("default", b))   // migrate legacy flat format
         }
         guard !parsed.isEmpty else { return }
 
@@ -244,13 +242,13 @@ final class Mapping {
             // file's values merged over it (so a partial/hand-edited file still has
             // every key). Other profiles are taken as written.
             var rebuilt: [Profile] = []
-            var def = Profile(name: "default", bundleId: nil, bindings: Mapping.defaultsDict())
+            var def = Profile(name: "default", bindings: Mapping.defaultsDict())
             if let fileDef = parsed.first(where: { $0.name == "default" }) {
                 for (n, c) in fileDef.bindings { def.bindings[n] = c }
             }
             rebuilt.append(def)
             for p in parsed where p.name != "default" {
-                rebuilt.append(Profile(name: p.name, bundleId: p.bundleId, bindings: p.bindings))
+                rebuilt.append(Profile(name: p.name, bindings: p.bindings))
             }
             profiles = rebuilt
             _activeIndex = profiles.firstIndex { $0.name == prevName } ?? 0   // keep the active profile if it survived
@@ -269,10 +267,7 @@ final class Mapping {
              .replacingOccurrences(of: "\"", with: "\\\"")
         }
         func block(_ p: Profile) -> String {
-            var head = "    {\n      \"name\": \"\(esc(p.name))\""
-            if let bid = p.bundleId, !bid.isEmpty {
-                head += ",\n      \"match\": \"\(esc(bid))\""
-            }
+            let head = "    {\n      \"name\": \"\(esc(p.name))\""
             var lines: [String] = []
             for name in Mapping.order {
                 lines.append("        \"\(name)\": \"\(esc(p.bindings[name] ?? ""))\"")
@@ -297,15 +292,15 @@ final class Mapping {
         if let i = profiles.firstIndex(where: { $0.name == "default" }) {
             if i != 0 { let d = profiles.remove(at: i); profiles.insert(d, at: 0) }
         } else {
-            profiles.insert(Profile(name: "default", bundleId: nil, bindings: Mapping.defaultsDict()), at: 0)
+            profiles.insert(Profile(name: "default", bindings: Mapping.defaultsDict()), at: 0)
         }
     }
 
     // MARK: - Profile read/write API for the Settings window
 
-    /// Profile names + their app match, default first.
-    func profileSummaries() -> [(name: String, bundleId: String?)] {
-        withLock { profiles.map { ($0.name, $0.bundleId) } }
+    /// Profile names, default first.
+    func profileNames() -> [String] {
+        withLock { profiles.map { $0.name } }
     }
 
     /// One profile's bindings in physical-layout order (missing keys yield "").
@@ -316,10 +311,10 @@ final class Mapping {
 
     /// Replace the entire profile set in one shot (one disk write), then apply live.
     /// Used by the Settings window's Save so multiple profiles can't race the watcher.
-    func replaceAllProfiles(_ list: [(name: String, bundleId: String?, bindings: [String: String])]) {
+    func replaceAllProfiles(_ list: [(name: String, bindings: [String: String])]) {
         let newName: String = withLock {
             let prevName = profiles.isEmpty ? "default" : profiles[safeActiveIndexLocked()].name
-            profiles = list.map { Profile(name: $0.name, bundleId: $0.bundleId, bindings: $0.bindings) }
+            profiles = list.map { Profile(name: $0.name, bindings: $0.bindings) }
             ensureDefaultFirstLocked()
             _activeIndex = profiles.firstIndex { $0.name == prevName } ?? 0   // keep active profile if it survived
             return profiles[_activeIndex].name
@@ -328,15 +323,15 @@ final class Mapping {
         onActiveProfileChange?(newName)
     }
 
-    /// Add a profile (seeded as a copy of the default bindings) bound to `bundleId`.
-    /// No-op if the name is empty/"default"/already taken. Persists + applies live.
+    /// Add a profile, seeded as a copy of the default bindings. No-op if the name is
+    /// empty/"default"/already taken. Persists + applies live.
     @discardableResult
-    func addProfile(named name: String, bundleId: String?) -> Bool {
+    func addProfile(named name: String) -> Bool {
         let ok: Bool = withLock {
             guard !name.isEmpty, name != "default",
                   !profiles.contains(where: { $0.name == name }) else { return false }
             let seed = profiles[0].bindings
-            profiles.append(Profile(name: name, bundleId: bundleId, bindings: seed))
+            profiles.append(Profile(name: name, bindings: seed))
             return true
         }
         if ok { persist() }
