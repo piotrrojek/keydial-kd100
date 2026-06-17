@@ -37,18 +37,19 @@ final class HUDController {
 
     // MARK: - Reveal (cheat-sheet)
 
-    func reveal(profile: String, bindings: [String: String]) {
-        let device = DeviceView(profile: profile, tint: Theme.tint(for: profile), bindings: bindings)
+    func reveal(profile: String, bindings: [String: String], secondary: Set<String> = []) {
+        let device = DeviceView(profile: profile, tint: Theme.tint(for: profile),
+                                bindings: bindings, secondary: secondary)
         present(content: device, interactive: true)
         isRevealed = true
         installClickAwayMonitor()
     }
 
-    func toggleReveal(profile: String, bindings: [String: String]) {
+    func toggleReveal(profile: String, bindings: [String: String], secondary: Set<String> = []) {
         if isRevealed && panel.isVisible {
             dismiss()
         } else {
-            reveal(profile: profile, bindings: bindings)
+            reveal(profile: profile, bindings: bindings, secondary: secondary)
         }
     }
 

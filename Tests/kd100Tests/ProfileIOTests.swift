@@ -54,4 +54,28 @@ final class ProfileIOTests: XCTestCase {
         XCTAssertNil(ProfileIO.decode(Data("not json".utf8)))
         XCTAssertNil(ProfileIO.decode(Data(#"{ "unrelated": true }"#.utf8)))
     }
+
+    // MARK: - Hold / double-tap (Phase 4)
+
+    func testHoldDoubleRoundTrips() {
+        let data = ProfileIO.encodeProfile(name: "P", bindings: ["enter": "t", "1": "one"],
+                                           hold: ["enter": "h"], double: ["enter": "d", "dot": "dd"])
+        let out = ProfileIO.decode(data)
+        XCTAssertEqual(out?.first?.bindings["enter"], "t")
+        XCTAssertEqual(out?.first?.bindings["1"], "one")        // plain string key still works
+        XCTAssertEqual(out?.first?.hold["enter"], "h")
+        XCTAssertEqual(out?.first?.double["enter"], "d")
+        XCTAssertEqual(out?.first?.double["dot"], "dd")
+        XCTAssertNil(out?.first?.hold["dot"])
+    }
+
+    func testDecodesObjectShapeFromText() {
+        let cfg = #"{ "profiles": [ { "name": "default", "bindings": { "1": "tap1", "enter": { "tap": "t", "hold": "h" } } } ] }"#
+            .data(using: .utf8)!
+        let out = ProfileIO.decode(cfg)
+        XCTAssertEqual(out?.first?.bindings["1"], "tap1")       // mixed string + object values
+        XCTAssertEqual(out?.first?.bindings["enter"], "t")
+        XCTAssertEqual(out?.first?.hold["enter"], "h")
+        XCTAssertNil(out?.first?.double["enter"])
+    }
 }

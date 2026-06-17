@@ -38,9 +38,40 @@ final class KD100 {
     // fed the monotonic clock here in the live path.
     private var knobVelocity = KnobVelocity()
 
+    // Turns key down/up edges into tap / hold / double-tap gestures. A run-loop timer
+    // drives its deadlines (hold + double-tap) since the device sends nothing while a key
+    // is merely held.
+    private let gestures = GestureEngine()
+    private var gestureTimer: Timer?
+    private var lastListening = false   // detect Listen-mode toggles to reset gesture state
+
     init(mode: Mode) {
         self.mode = mode
         self.seize = (mode == .run) // only the live daemon grabs the device
+        configureGestures()
+    }
+
+    private func configureGestures() {
+        gestures.hasHold = { [weak self] in self?.mapping.hasHoldGesture($0) ?? false }
+        gestures.hasDouble = { [weak self] in self?.mapping.hasDoubleGesture($0) ?? false }
+        gestures.onGesture = { [weak self] name, g in self?.mapping.dispatchGesture(name: name, gesture: g) }
+    }
+
+    /// Keep a run-loop timer alive only while a hold/double deadline is pending.
+    private func updateGestureTimer() {
+        if gestures.hasPending {
+            guard gestureTimer == nil else { return }
+            let t = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                self.gestures.tick(ProcessInfo.processInfo.systemUptime)
+                self.updateGestureTimer()
+            }
+            RunLoop.current.add(t, forMode: .common)
+            gestureTimer = t
+        } else {
+            gestureTimer?.invalidate()
+            gestureTimer = nil
+        }
     }
 
     private func ts() -> String { String(format: "%9.3f", ProcessInfo.processInfo.systemUptime) }
@@ -144,14 +175,33 @@ final class KD100 {
     private func dispatchValue(page: Int, usage: Int, value: Int) {}
 
     private func dispatchReport(id: Int, bytes: [UInt8]) {
+        // Listen mode locates keys immediately and without gesture timing; reset the
+        // gesture state on the on/off transition so nothing stale lingers.
+        let listening = mapping.identifyMode
+        if listening != lastListening {
+            lastListening = listening
+            gestures.reset()
+            updateGestureTimer()
+        }
+
         for event in decoder.decode(reportID: id, bytes: bytes) {
             switch event {
             case .keyDown(let rawID):
-                mapping.dispatch(rawID)
-            case .keyUp:
-                break                       // used by the gesture layer (hold/double-tap)
+                if listening {
+                    mapping.dispatch(rawID)            // immediate locate, no timing
+                } else if let name = mapping.name(forRawID: rawID) {
+                    gestures.config.holdSeconds = Double(mapping.holdMs) / 1000
+                    gestures.config.doubleSeconds = Double(mapping.doubleTapMs) / 1000
+                    gestures.keyDown(name, at: ProcessInfo.processInfo.systemUptime)
+                    updateGestureTimer()
+                }
+            case .keyUp(let rawID):
+                if !listening, let name = mapping.name(forRawID: rawID) {
+                    gestures.keyUp(name, at: ProcessInfo.processInfo.systemUptime)
+                    updateGestureTimer()
+                }
             case .knobPress:
-                mapping.dispatch("dial:press")   // reserved: cycles profiles
+                mapping.dispatch("dial:press")        // reserved: cycles profiles
             case .knobRelease:
                 break
             case .knobTurn(let cw, let delta):

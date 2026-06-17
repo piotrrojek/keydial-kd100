@@ -201,8 +201,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @objc private func toggleCheatSheet() {
         let name = engine.mapping.activeProfileName
         var bindings: [String: String] = [:]
-        for key in Mapping.order { bindings[key] = engine.mapping.activeBinding(for: key) ?? "" }
-        hud.toggleReveal(profile: name, bindings: bindings)
+        var secondary: Set<String> = []
+        for key in Mapping.order {
+            bindings[key] = engine.mapping.activeBinding(for: key) ?? ""
+            if engine.mapping.hasHoldGesture(key) || engine.mapping.hasDoubleGesture(key) { secondary.insert(key) }
+        }
+        hud.toggleReveal(profile: name, bindings: bindings, secondary: secondary)
     }
 
     private func notifyFailure(name: String, code: Int32, detail: String) {

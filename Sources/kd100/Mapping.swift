@@ -87,9 +87,24 @@ final class Mapping {
     static let configNote = "Profiles: \"default\" plus any named profiles you add. Switch between them manually with the knob press — it cycles default -> next -> default and is reserved app-wide, so it never runs a command. Within a profile, key = KD100 physical key (numlock slash star minus / 7 8 9 plus-upper / 4 5 6 plus-lower / 1 2 3 enter / 0 dot / knob-cw knob-ccw knob-press); value = shell command run via your login shell ($SHELL -ilc). A key omitted from a profile falls through to \"default\"; a key set to \"\" is disabled there. knob-cw/knob-ccw commands always see $KD100_DELTA (this turn's magnitude) and $KD100_VELOCITY (smoothed detents/sec) in their environment. Top-level knobSpinRepeat (true/false) makes a fast spin run the knob command up to knobMaxRepeat times. Edit in the menu-bar app's Settings window (applies live), or edit here — changes are picked up live."
 
     /// One named binding set. Profiles are cycled manually by the knob press.
+    ///
+    /// `bindings` is the **tap** command per key. `hold` and `double` are optional second
+    /// and third actions (long-press / double-tap) — sparse, present only for keys that
+    /// define them. All three resolve with the same fall-through to the default profile.
     private struct Profile {
         var name: String            // display name + JSON key; "default" is reserved/required
-        var bindings: [String: String]   // human name -> command
+        var bindings: [String: String]    // human name -> tap command
+        var hold: [String: String] = [:]      // human name -> long-press command
+        var double: [String: String] = [:]    // human name -> double-tap command
+    }
+
+    /// A profile's full binding set, used to pass tap+hold+double in one shot
+    /// (`replaceAllProfiles`, `keyBindings(forProfile:)`).
+    struct ProfileBindings {
+        var name: String
+        var tap: [String: String]
+        var hold: [String: String] = [:]
+        var double: [String: String] = [:]
     }
 
     private let idToName: [String: String]
@@ -141,6 +156,21 @@ final class Mapping {
     var knobMaxRepeat: Int {
         get { withLock { _knobMaxRepeat } }
         set { withLock { _knobMaxRepeat = max(1, min(newValue, 20)) } }
+    }
+
+    // Gesture timing (global). Milliseconds; guarded by `lock`.
+    private var _holdMs = 350     // press longer than this → hold
+    private var _doubleMs = 250   // second tap within this → double-tap
+
+    /// How long a key must stay down to count as a hold (150…1000 ms).
+    var holdMs: Int {
+        get { withLock { _holdMs } }
+        set { withLock { _holdMs = max(150, min(newValue, 1000)) } }
+    }
+    /// The double-tap window — also the tap latency a double-bound key pays (120…600 ms).
+    var doubleTapMs: Int {
+        get { withLock { _doubleMs } }
+        set { withLock { _doubleMs = max(120, min(newValue, 600)) } }
     }
 
     /// When true, controls are reported via `onControl` but their commands are NOT
@@ -211,6 +241,31 @@ final class Mapping {
         }
     }
 
+    /// The active profile's **hold** (long-press) command for `name`, falling through to
+    /// default. nil/"" means no hold action — the key just taps.
+    func activeHold(for name: String) -> String? {
+        withLock {
+            let active = profiles[safeActiveIndexLocked()]
+            return active.hold[name] ?? profiles[0].hold[name]
+        }
+    }
+
+    /// The active profile's **double-tap** command for `name`, falling through to default.
+    func activeDouble(for name: String) -> String? {
+        withLock {
+            let active = profiles[safeActiveIndexLocked()]
+            return active.double[name] ?? profiles[0].double[name]
+        }
+    }
+
+    /// Whether `name` has a hold / double action in effect (the gesture engine asks these
+    /// to decide whether a key needs press/release timing at all).
+    func hasHoldGesture(_ name: String) -> Bool { activeHold(for: name)?.isEmpty == false }
+    func hasDoubleGesture(_ name: String) -> Bool { activeDouble(for: name)?.isEmpty == false }
+
+    /// Map a raw HID id to its human key name (for the gesture layer, which works in names).
+    func name(forRawID rawID: String) -> String? { idToName[rawID] }
+
     // MARK: - Live reload
 
     /// Begin watching the config file so hand-edits apply without an app relaunch.
@@ -242,25 +297,31 @@ final class Mapping {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         // Parse either the current profiles array or the legacy single `bindings` block.
-        var parsed: [(name: String, bindings: [String: String])] = []
+        // Each per-key value is a bare string (tap only) or `{tap,hold?,double?}`.
+        var parsed: [Profile] = []
         if let arr = obj["profiles"] as? [[String: Any]] {
             for pd in arr {
                 guard let name = pd["name"] as? String, !name.isEmpty else { continue }
                 // A legacy "match" key (from the retired per-app-switching design) is ignored.
-                let b = (pd["bindings"] as? [String: String]) ?? [:]
-                parsed.append((name, b))
+                let (tap, hold, dbl) = Mapping.parseBindings(pd["bindings"] as? [String: Any] ?? [:])
+                parsed.append(Profile(name: name, bindings: tap, hold: hold, double: dbl))
             }
-        } else if let b = obj["bindings"] as? [String: String] {
-            parsed.append(("default", b))   // migrate legacy flat format
+        } else if let b = obj["bindings"] as? [String: Any] {
+            let (tap, hold, dbl) = Mapping.parseBindings(b)
+            parsed.append(Profile(name: "default", bindings: tap, hold: hold, double: dbl))   // legacy flat
         }
         guard !parsed.isEmpty else { return }
 
         let spin = (obj["knobSpinRepeat"] as? Bool) ?? false
         let maxRep = (obj["knobMaxRepeat"] as? Int) ?? 4
+        let holdMsRaw = (obj["holdMs"] as? Int) ?? 350
+        let doubleMsRaw = (obj["doubleTapMs"] as? Int) ?? 250
 
         withLock {
             _knobSpinRepeat = spin
             _knobMaxRepeat = max(1, min(maxRep, 20))
+            _holdMs = max(150, min(holdMsRaw, 1000))
+            _doubleMs = max(120, min(doubleMsRaw, 600))
             let prevName = profiles.isEmpty ? "default" : profiles[safeActiveIndexLocked()].name
             // The default profile keeps the built-in defaults as a base, with the
             // file's values merged over it (so a partial/hand-edited file still has
@@ -269,14 +330,30 @@ final class Mapping {
             var def = Profile(name: "default", bindings: Mapping.defaultsDict())
             if let fileDef = parsed.first(where: { $0.name == "default" }) {
                 for (n, c) in fileDef.bindings { def.bindings[n] = c }
+                def.hold = fileDef.hold
+                def.double = fileDef.double
             }
             rebuilt.append(def)
-            for p in parsed where p.name != "default" {
-                rebuilt.append(Profile(name: p.name, bindings: p.bindings))
-            }
+            for p in parsed where p.name != "default" { rebuilt.append(p) }
             profiles = rebuilt
             _activeIndex = profiles.firstIndex { $0.name == prevName } ?? 0   // keep the active profile if it survived
         }
+    }
+
+    /// Split a raw bindings dict (values are strings or `{tap,hold?,double?}` objects) into
+    /// the three per-action dicts. Empty hold/double are dropped so the dicts stay sparse.
+    private static func parseBindings(_ raw: [String: Any]) -> (tap: [String: String], hold: [String: String], double: [String: String]) {
+        var tap: [String: String] = [:], hold: [String: String] = [:], double: [String: String] = [:]
+        for (k, v) in raw {
+            if let s = v as? String {
+                tap[k] = s
+            } else if let o = v as? [String: Any] {
+                tap[k] = (o["tap"] as? String) ?? ""
+                if let h = o["hold"] as? String, !h.isEmpty { hold[k] = h }
+                if let d = o["double"] as? String, !d.isEmpty { double[k] = d }
+            }
+        }
+        return (tap, hold, double)
     }
 
     /// Write all profiles to the JSON file, in physical-layout order, with the
@@ -294,17 +371,29 @@ final class Mapping {
             let head = "    {\n      \"name\": \"\(esc(p.name))\""
             var lines: [String] = []
             for name in Mapping.order {
-                lines.append("        \"\(name)\": \"\(esc(p.bindings[name] ?? ""))\"")
+                let tap = p.bindings[name] ?? ""
+                let hold = p.hold[name] ?? ""
+                let dbl = p.double[name] ?? ""
+                if hold.isEmpty && dbl.isEmpty {
+                    lines.append("        \"\(name)\": \"\(esc(tap))\"")     // plain key → string
+                } else {
+                    var parts = ["\"tap\": \"\(esc(tap))\""]                 // key with extras → object
+                    if !hold.isEmpty { parts.append("\"hold\": \"\(esc(hold))\"") }
+                    if !dbl.isEmpty { parts.append("\"double\": \"\(esc(dbl))\"") }
+                    lines.append("        \"\(name)\": { \(parts.joined(separator: ", ")) }")
+                }
             }
             return head + ",\n      \"bindings\": {\n" + lines.joined(separator: ",\n") + "\n      }\n    }"
         }
         let body = snap.map(block).joined(separator: ",\n")
-        let (spin, maxRep) = withLock { (_knobSpinRepeat, _knobMaxRepeat) }
+        let (spin, maxRep, holdMsV, doubleMsV) = withLock { (_knobSpinRepeat, _knobMaxRepeat, _holdMs, _doubleMs) }
         let json = """
         {
           "_note": "\(esc(Mapping.configNote))",
           "knobSpinRepeat": \(spin ? "true" : "false"),
           "knobMaxRepeat": \(maxRep),
+          "holdMs": \(holdMsV),
+          "doubleTapMs": \(doubleMsV),
           "profiles": [
         \(body)
           ]
@@ -330,18 +419,38 @@ final class Mapping {
         withLock { profiles.map { $0.name } }
     }
 
-    /// One profile's bindings in physical-layout order (missing keys yield "").
+    /// One profile's tap bindings in physical-layout order (missing keys yield "").
     func bindings(forProfile name: String) -> [(name: String, cmd: String)] {
         let snap = withLock { profiles.first(where: { $0.name == name })?.bindings ?? [:] }
         return Mapping.order.map { ($0, snap[$0] ?? "") }
     }
 
+    /// One profile's full bindings (tap + hold + double) as sparse dicts — for the Settings
+    /// window's working copy and export.
+    func keyBindings(forProfile name: String) -> ProfileBindings {
+        withLock {
+            let p = profiles.first(where: { $0.name == name })
+            return ProfileBindings(name: name, tap: p?.bindings ?? [:],
+                                   hold: p?.hold ?? [:], double: p?.double ?? [:])
+        }
+    }
+
     /// Replace the entire profile set in one shot (one disk write), then apply live.
-    /// Used by the Settings window's Save so multiple profiles can't race the watcher.
+    /// String form: tap commands only — clears any hold/double on these profiles.
     func replaceAllProfiles(_ list: [(name: String, bindings: [String: String])]) {
+        replaceAll(list.map { Profile(name: $0.name, bindings: $0.bindings) })
+    }
+
+    /// Full form (tap + hold + double). Used by the Settings window's Save so multiple
+    /// profiles can't race the watcher and the secondary actions are preserved.
+    func replaceAllProfiles(_ list: [ProfileBindings]) {
+        replaceAll(list.map { Profile(name: $0.name, bindings: $0.tap, hold: $0.hold, double: $0.double) })
+    }
+
+    private func replaceAll(_ built: [Profile]) {
         let newName: String = withLock {
             let prevName = profiles.isEmpty ? "default" : profiles[safeActiveIndexLocked()].name
-            profiles = list.map { Profile(name: $0.name, bindings: $0.bindings) }
+            profiles = built
             ensureDefaultFirstLocked()
             _activeIndex = profiles.firstIndex { $0.name == prevName } ?? 0   // keep active profile if it survived
             return profiles[_activeIndex].name
@@ -350,15 +459,15 @@ final class Mapping {
         onActiveProfileChange?(newName)
     }
 
-    /// Add a profile, seeded as a copy of the default bindings. No-op if the name is
-    /// empty/"default"/already taken. Persists + applies live.
+    /// Add a profile, seeded as a copy of the default profile (all three actions). No-op if
+    /// the name is empty/"default"/already taken. Persists + applies live.
     @discardableResult
     func addProfile(named name: String) -> Bool {
         let ok: Bool = withLock {
             guard !name.isEmpty, name != "default",
                   !profiles.contains(where: { $0.name == name }) else { return false }
-            let seed = profiles[0].bindings
-            profiles.append(Profile(name: name, bindings: seed))
+            let seed = profiles[0]
+            profiles.append(Profile(name: name, bindings: seed.bindings, hold: seed.hold, double: seed.double))
             return true
         }
         if ok { persist() }
@@ -387,15 +496,22 @@ final class Mapping {
         persist()
     }
 
-    /// Restore the default profile to its built-in bindings, persist, apply live.
+    /// Restore the default profile to its built-in bindings (clearing hold/double),
+    /// persist, apply live.
     func resetToDefaults() {
-        withLock { profiles[0].bindings = Mapping.defaultsDict() }
+        withLock {
+            profiles[0].bindings = Mapping.defaultsDict()
+            profiles[0].hold = [:]
+            profiles[0].double = [:]
+        }
         persist()
     }
 
     // MARK: - Dispatch
 
     /// Run the command the active profile binds to the control whose raw HID id is `rawID`.
+    /// This is the simple **tap** path (keyboard/consumer keyDown, knob press); the hold /
+    /// double-tap gestures come through `dispatchGesture` from the gesture engine.
     func dispatch(_ rawID: String) {
         guard let name = idToName[rawID] else { return }
         // The profile-switch control is reserved app-wide: it cycles profiles and
@@ -405,7 +521,20 @@ final class Mapping {
             if identifyMode { onControl?(name, nil, false) } else { cycleProfile() }
             return
         }
-        fire(name: name)
+        run(name: name, command: activeBinding(for: name))
+    }
+
+    /// Run the command for a resolved key gesture (tap / hold / double-tap). The gesture
+    /// engine only emits `.hold` / `.double` for keys that actually define them, so each
+    /// gesture runs its own command verbatim (no falling back across gestures).
+    func dispatchGesture(name: String, gesture: KeyGesture) {
+        let cmd: String?
+        switch gesture {
+        case .tap:    cmd = activeBinding(for: name)
+        case .hold:   cmd = activeHold(for: name)
+        case .double: cmd = activeDouble(for: name)
+        }
+        run(name: name, command: cmd)
     }
 
     /// Run a knob turn. Always exposes `$KD100_DELTA` / `$KD100_VELOCITY` to the command;
@@ -416,17 +545,16 @@ final class Mapping {
         let (spin, maxRep) = withLock { (_knobSpinRepeat, _knobMaxRepeat) }
         let count = spin ? min(max(1, delta), maxRep) : 1
         let env = ["KD100_DELTA": String(delta), "KD100_VELOCITY": String(velocity)]
-        fire(name: name, env: env, repeatCount: count)
+        run(name: name, command: activeBinding(for: name), env: env, repeatCount: count)
     }
 
-    /// Resolve `name` in the active profile, report it via `onControl`, and run it (unless
-    /// in identify/Listen mode or the binding is blank). `repeatCount > 1` runs the command
-    /// that many times **in one shell** (`cmd ; cmd ; …`) so the steps stay ordered.
-    private func fire(name: String, env: [String: String]? = nil, repeatCount: Int = 1) {
-        let cmd = activeBinding(for: name)
-        let willRun = !identifyMode && (cmd?.isEmpty == false)
-        onControl?(name, cmd, willRun)
-        guard willRun, let cmd = cmd else { return }
+    /// Report a control via `onControl` and run `command` (unless in identify/Listen mode or
+    /// it's blank). `repeatCount > 1` runs the command that many times **in one shell**
+    /// (`cmd ; cmd ; …`) so the steps stay ordered.
+    private func run(name: String, command: String?, env: [String: String]? = nil, repeatCount: Int = 1) {
+        let willRun = !identifyMode && (command?.isEmpty == false)
+        onControl?(name, command, willRun)
+        guard willRun, let cmd = command else { return }
         let toRun = repeatCount > 1
             ? Array(repeating: cmd, count: repeatCount).joined(separator: " ; ")
             : cmd

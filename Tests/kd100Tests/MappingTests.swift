@@ -254,4 +254,63 @@ final class MappingTests: XCTestCase {
         let written = (try? String(contentsOfFile: out, encoding: .utf8)) ?? ""
         XCTAssertEqual(written, "x")
     }
+
+    // MARK: - Hold / double-tap (Phase 4)
+
+    func testHoldDoubleRoundTripThroughDisk() {
+        let m = Mapping(path: configPath)
+        m.replaceAllProfiles([
+            Mapping.ProfileBindings(name: "default", tap: Mapping.defaultsDict(),
+                                    hold: ["enter": "echo hold"],
+                                    double: ["enter": "echo dbl", "dot": "echo dot2"]),
+        ])
+        let m2 = Mapping(path: configPath)
+        XCTAssertEqual(m2.activeBinding(for: "enter"), "aerospace fullscreen")   // tap untouched
+        XCTAssertEqual(m2.activeHold(for: "enter"), "echo hold")
+        XCTAssertEqual(m2.activeDouble(for: "enter"), "echo dbl")
+        XCTAssertEqual(m2.activeDouble(for: "dot"), "echo dot2")
+        XCTAssertTrue(m2.hasHoldGesture("enter"))
+        XCTAssertFalse(m2.hasHoldGesture("dot"))     // dot has only a double, no hold
+        XCTAssertTrue(m2.hasDoubleGesture("dot"))
+    }
+
+    func testGestureTimingOptionsRoundTrip() {
+        let m = Mapping(path: configPath)
+        XCTAssertEqual(m.holdMs, 350)
+        XCTAssertEqual(m.doubleTapMs, 250)
+        m.holdMs = 9999     // clamps to 1000
+        m.doubleTapMs = 10  // clamps to 120
+        XCTAssertEqual(m.holdMs, 1000)
+        XCTAssertEqual(m.doubleTapMs, 120)
+        m.replaceAllProfiles([("default", Mapping.defaultsDict())])   // persists globals too
+        let m2 = Mapping(path: configPath)
+        XCTAssertEqual(m2.holdMs, 1000)
+        XCTAssertEqual(m2.doubleTapMs, 120)
+    }
+
+    func testDispatchGestureRunsPerGestureCommand() {
+        let m = Mapping(path: configPath)
+        m.identifyMode = true   // report via onControl, don't spawn shells
+        m.replaceAllProfiles([
+            Mapping.ProfileBindings(name: "default", tap: ["enter": "T"],
+                                    hold: ["enter": "H"], double: ["enter": "D"]),
+        ])
+        var seen: [String?] = []
+        m.onControl = { _, cmd, _ in seen.append(cmd) }
+        m.dispatchGesture(name: "enter", gesture: .tap)
+        m.dispatchGesture(name: "enter", gesture: .hold)
+        m.dispatchGesture(name: "enter", gesture: .double)
+        XCTAssertEqual(seen, ["T", "H", "D"])
+    }
+
+    func testStringReplaceAllProfilesClearsSecondaryActions() {
+        let m = Mapping(path: configPath)
+        m.replaceAllProfiles([
+            Mapping.ProfileBindings(name: "default", tap: Mapping.defaultsDict(),
+                                    hold: ["enter": "echo h"], double: [:]),
+        ])
+        XCTAssertEqual(m.activeHold(for: "enter"), "echo h")
+        m.replaceAllProfiles([("default", Mapping.defaultsDict())])   // tap-only overload
+        XCTAssertNil(m.activeHold(for: "enter"))
+    }
 }

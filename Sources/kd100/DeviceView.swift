@@ -33,16 +33,18 @@ final class DeviceView: NSView {
     private var profile: String
     private var tint: NSColor
     private var bindings: [String: String]
+    private var secondary: Set<String>      // keys that also have a hold/double action
     private var selected: String?
     private var flashed: String?
 
     /// Click a keycap → its name. Set by the Settings window to focus the matching field.
     var onSelect: ((String) -> Void)?
 
-    init(profile: String, tint: NSColor, bindings: [String: String]) {
+    init(profile: String, tint: NSColor, bindings: [String: String], secondary: Set<String> = []) {
         self.profile = profile
         self.tint = tint
         self.bindings = bindings
+        self.secondary = secondary
         super.init(frame: NSRect(origin: .zero, size: DeviceView.preferredSize))
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
@@ -51,8 +53,8 @@ final class DeviceView: NSView {
 
     // MARK: - State
 
-    func update(profile: String, tint: NSColor, bindings: [String: String]) {
-        self.profile = profile; self.tint = tint; self.bindings = bindings
+    func update(profile: String, tint: NSColor, bindings: [String: String], secondary: Set<String> = []) {
+        self.profile = profile; self.tint = tint; self.bindings = bindings; self.secondary = secondary
         needsDisplay = true
     }
 
@@ -169,6 +171,13 @@ final class DeviceView: NSView {
             .foregroundColor: isFlash ? NSColor.black.withAlphaComponent(0.65) : Theme.keyFaint,
         ]
         (Theme.keyGlyph(name) as NSString).draw(at: NSPoint(x: r.minX + 9, y: r.minY + 7), withAttributes: glyphAttr)
+
+        // A small dot in the top-right corner marks a key that also has a hold/double action.
+        if secondary.contains(name) {
+            let dot = NSBezierPath(ovalIn: NSRect(x: r.maxX - 13, y: r.minY + 8, width: 5, height: 5))
+            (isFlash ? NSColor.black.withAlphaComponent(0.55) : tint).setFill()
+            dot.fill()
+        }
 
         let label = Theme.prettyBinding(cmd)
         guard !label.isEmpty else { return }

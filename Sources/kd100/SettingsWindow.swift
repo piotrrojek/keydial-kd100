@@ -24,6 +24,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var maxRepeatValue: NSTextField!
     private var maxRepeatRow: NSStackView!
 
+    // Gesture timing controls (global): hold threshold + double-tap window.
+    private var holdStepper: NSStepper!
+    private var holdValue: NSTextField!
+    private var doubleStepper: NSStepper!
+    private var doubleValue: NSTextField!
+
     /// Called after the profile set is committed (Save), so the tray app can refresh
     /// the active-profile menu line.
     var onProfilesChanged: (() -> Void)?
@@ -31,8 +37,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     /// In-memory working copy of every profile. Edits live here until Save commits the
     /// whole set in one shot (`mapping.replaceAllProfiles`) — so switching the editor
     /// between profiles never loses or prematurely persists changes.
-    private struct EditProfile { var name: String; var bindings: [String: String] }
+    private struct EditProfile {
+        var name: String
+        var bindings: [String: String]              // tap
+        var hold: [String: String] = [:]            // long-press
+        var double: [String: String] = [:]          // double-tap
+    }
     private var workingProfiles: [EditProfile] = []
+    private var gestureButtons: [String: NSButton] = [:]   // per-key "secondary actions" button
     private var editingIndex = 0
     private var profilePopup: NSPopUpButton!
     private var removeButton: NSButton!
@@ -154,6 +166,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
         form.setCustomSpacing(14, after: form.arrangedSubviews.last!)
         form.addArrangedSubview(makeKnobOptions())
+
+        form.addArrangedSubview(makeSectionHeader("Gestures"))
+        form.setCustomSpacing(8, after: form.arrangedSubviews.last!)
+        form.addArrangedSubview(makeGestureOptions())
 
         let pathLabel = NSTextField(labelWithString: mapping.path)
         pathLabel.textColor = .tertiaryLabelColor
@@ -290,7 +306,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         test.translatesAutoresizingMaskIntoConstraints = false
         test.setContentHuggingPriority(.required, for: .horizontal)
 
-        let row = NSStackView(views: [label, field, test])
+        var views = [label, field, test]
+        // Keycaps get a hold / double-tap editor; the knob turns (cw/ccw) have no
+        // press/release, so no secondary gestures there.
+        if !Mapping.knobNames.contains(name) {
+            let gear = NSButton(title: "⋯", target: self, action: #selector(gestureTapped(_:)))
+            gear.bezelStyle = .rounded
+            gear.toolTip = "Add a hold (long-press) or double-tap action for this key"
+            gear.identifier = NSUserInterfaceItemIdentifier(name)
+            gear.translatesAutoresizingMaskIntoConstraints = false
+            gear.setContentHuggingPriority(.required, for: .horizontal)
+            gestureButtons[name] = gear
+            views.append(gear)
+        }
+
+        let row = NSStackView(views: views)
         row.orientation = .horizontal
         row.alignment = .firstBaseline
         row.spacing = 10
@@ -364,6 +394,136 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         maxRepeatRow.isHidden = !mapping.knobSpinRepeat
     }
 
+    /// The global gesture-timing block: hold threshold + double-tap window steppers.
+    private func makeGestureOptions() -> NSView {
+        func stepperRow(_ title: String, value: Int, min: Double, max: Double,
+                        action: Selector) -> (row: NSStackView, stepper: NSStepper, label: NSTextField) {
+            let lbl = NSTextField(labelWithString: title)
+            lbl.font = .systemFont(ofSize: 12)
+            lbl.translatesAutoresizingMaskIntoConstraints = false
+            lbl.widthAnchor.constraint(equalToConstant: 130).isActive = true
+
+            let val = NSTextField(labelWithString: String(value))
+            val.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+            val.alignment = .right
+            val.translatesAutoresizingMaskIntoConstraints = false
+            val.widthAnchor.constraint(equalToConstant: 40).isActive = true
+
+            let unit = NSTextField(labelWithString: "ms")
+            unit.font = .systemFont(ofSize: 12)
+            unit.textColor = .secondaryLabelColor
+            unit.translatesAutoresizingMaskIntoConstraints = false
+
+            let st = NSStepper()
+            st.minValue = min; st.maxValue = max; st.increment = 10; st.valueWraps = false
+            st.integerValue = value
+            st.target = self; st.action = action
+            st.translatesAutoresizingMaskIntoConstraints = false
+
+            let row = NSStackView(views: [lbl, val, unit, st])
+            row.orientation = .horizontal; row.spacing = 6; row.alignment = .centerY
+            row.translatesAutoresizingMaskIntoConstraints = false
+            return (row, st, val)
+        }
+
+        let hold = stepperRow("Hold threshold:", value: mapping.holdMs, min: 150, max: 1000,
+                              action: #selector(holdChanged(_:)))
+        holdStepper = hold.stepper; holdValue = hold.label
+        let dbl = stepperRow("Double-tap window:", value: mapping.doubleTapMs, min: 120, max: 600,
+                             action: #selector(doubleChanged(_:)))
+        doubleStepper = dbl.stepper; doubleValue = dbl.label
+
+        let hint = NSTextField(wrappingLabelWithString:
+            "Use the ⋯ button on a key to add a Hold (long-press) or Double-tap action. Hold fires "
+            + "after the threshold; a Double must land within the window (which is also the small tap "
+            + "delay a double-bound key pays). A key with neither has zero added latency.")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        hint.preferredMaxLayoutWidth = 520
+
+        let stack = NSStackView(views: [hold.row, dbl.row, hint])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    @objc private func holdChanged(_ s: NSStepper) { holdValue.stringValue = String(s.integerValue) }
+    @objc private func doubleChanged(_ s: NSStepper) { doubleValue.stringValue = String(s.integerValue) }
+
+    private func syncGestureOptions() {
+        holdStepper.integerValue = mapping.holdMs
+        holdValue.stringValue = String(mapping.holdMs)
+        doubleStepper.integerValue = mapping.doubleTapMs
+        doubleValue.stringValue = String(mapping.doubleTapMs)
+    }
+
+    /// Open the per-key secondary-action editor (Tap / Hold / Double) for a keycap.
+    @objc private func gestureTapped(_ sender: NSButton) {
+        guard let name = sender.identifier?.rawValue, editingIndex < workingProfiles.count else { return }
+        captureFields()   // fold the tap field's current text into the working copy first
+        let tap = workingProfiles[editingIndex].bindings[name] ?? ""
+        let hold = workingProfiles[editingIndex].hold[name] ?? ""
+        let dbl = workingProfiles[editingIndex].double[name] ?? ""
+
+        let alert = NSAlert()
+        alert.messageText = "Secondary actions — \(name)"
+        alert.informativeText = "Tap runs on a quick press. Hold runs on a long press; Double runs on a quick "
+            + "double-tap. Leave Hold and Double blank to keep this key tap-only (no added latency)."
+
+        let w: CGFloat = 380
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: 96))
+        func makeField(y: CGFloat, title: String, value: String) -> NSTextField {
+            let lbl = NSTextField(labelWithString: title)
+            lbl.frame = NSRect(x: 0, y: y, width: 60, height: 20)
+            lbl.alignment = .right
+            container.addSubview(lbl)
+            let f = NSTextField(frame: NSRect(x: 68, y: y - 2, width: w - 68, height: 24))
+            f.stringValue = value
+            f.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            f.placeholderString = "(none)"
+            container.addSubview(f)
+            return f
+        }
+        let tapField = makeField(y: 68, title: "Tap:", value: tap)
+        let holdField = makeField(y: 36, title: "Hold:", value: hold)
+        let dblField = makeField(y: 4, title: "Double:", value: dbl)
+        tapField.placeholderString = "(disabled)"
+        alert.accessoryView = container
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = holdField
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let t = tapField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let h = holdField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let d = dblField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        workingProfiles[editingIndex].bindings[name] = t
+        workingProfiles[editingIndex].hold[name] = h.isEmpty ? nil : h
+        workingProfiles[editingIndex].double[name] = d.isEmpty ? nil : d
+        fields[name]?.stringValue = t
+        deviceView.updateBinding(name, t)
+        updateGestureIndicator(name)
+        savedLabel.stringValue = "\(name): secondary actions updated — Save to apply"
+    }
+
+    /// Mark a key's ⋯ button when it has hold/double actions (H / D / HD), so they're
+    /// visible without opening the sheet.
+    private func updateGestureIndicator(_ name: String) {
+        guard let b = gestureButtons[name], editingIndex < workingProfiles.count else { return }
+        let h = !(workingProfiles[editingIndex].hold[name] ?? "").isEmpty
+        let d = !(workingProfiles[editingIndex].double[name] ?? "").isEmpty
+        if h || d {
+            b.title = (h ? "H" : "") + (d ? "D" : "")
+            b.toolTip = "Has secondary actions — click to edit"
+        } else {
+            b.title = "⋯"
+            b.toolTip = "Add a hold (long-press) or double-tap action for this key"
+        }
+    }
+
+    private func updateGestureIndicators() { for name in gestureButtons.keys { updateGestureIndicator(name) } }
+
     private func makeSectionHeader(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text.uppercased())
         label.font = .systemFont(ofSize: 11, weight: .semibold)
@@ -431,10 +591,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     @objc private func saveTapped() {
         captureFields()
-        // Knob options are global — set them before the profile write so it persists once.
+        // Global options are set before the profile write so everything persists in one go.
         mapping.knobSpinRepeat = (spinCheckbox.state == .on)
         mapping.knobMaxRepeat = maxRepeatStepper.integerValue
-        mapping.replaceAllProfiles(workingProfiles.map { ($0.name, $0.bindings) })
+        mapping.holdMs = holdStepper.integerValue
+        mapping.doubleTapMs = doubleStepper.integerValue
+        mapping.replaceAllProfiles(workingProfiles.map {
+            Mapping.ProfileBindings(name: $0.name, tap: $0.bindings, hold: $0.hold, double: $0.double)
+        })
         onProfilesChanged?()
         flashSaved()
     }
@@ -484,8 +648,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             return
         }
         let name = uniqueName(raw)
-        let seed = workingProfiles.first(where: { $0.name == "default" })?.bindings ?? Mapping.defaultsDict()
-        workingProfiles.append(EditProfile(name: name, bindings: seed))
+        let def = workingProfiles.first(where: { $0.name == "default" })
+        workingProfiles.append(EditProfile(name: name, bindings: def?.bindings ?? Mapping.defaultsDict(),
+                                           hold: def?.hold ?? [:], double: def?.double ?? [:]))
         editingIndex = workingProfiles.count - 1
         rebuildProfilePopup(); populateFields(); updateProfileHint()
         savedLabel.stringValue = "Added \(name) — edit and Save to apply"
@@ -521,9 +686,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         panel.beginSheetModal(for: window) { [weak self] resp in
             guard resp == .OK, let url = panel.url, let self else { return }
             let data: Data = all
-                ? ProfileIO.encodeAll(self.workingProfiles.map { ($0.name, $0.bindings) })
+                ? ProfileIO.encodeAll(self.workingProfiles.map { ($0.name, $0.bindings, $0.hold, $0.double) })
                 : ProfileIO.encodeProfile(name: self.workingProfiles[self.editingIndex].name,
-                                          bindings: self.workingProfiles[self.editingIndex].bindings)
+                                          bindings: self.workingProfiles[self.editingIndex].bindings,
+                                          hold: self.workingProfiles[self.editingIndex].hold,
+                                          double: self.workingProfiles[self.editingIndex].double)
             do {
                 try data.write(to: url)
                 self.savedLabel.stringValue = "Exported \(url.lastPathComponent)"
@@ -552,12 +719,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                 if let i = self.workingProfiles.firstIndex(where: { $0.name.caseInsensitiveCompare(prof.name) == .orderedSame }) {
                     if prof.name == "default" {
                         for (k, v) in prof.bindings { self.workingProfiles[i].bindings[k] = v }   // merge into default
+                        for (k, v) in prof.hold { self.workingProfiles[i].hold[k] = v }
+                        for (k, v) in prof.double { self.workingProfiles[i].double[k] = v }
                     } else {
                         self.workingProfiles[i].bindings = prof.bindings                            // replace same-named
+                        self.workingProfiles[i].hold = prof.hold
+                        self.workingProfiles[i].double = prof.double
                     }
                     updated += 1
                 } else {
-                    self.workingProfiles.append(EditProfile(name: self.uniqueName(prof.name), bindings: prof.bindings))
+                    self.workingProfiles.append(EditProfile(name: self.uniqueName(prof.name),
+                                                            bindings: prof.bindings, hold: prof.hold, double: prof.double))
                     added += 1
                 }
             }
@@ -590,20 +762,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         workingProfiles[editingIndex].bindings = b
     }
 
-    /// Fill the fields from the profile being edited, then sync the device map.
+    /// Fill the fields from the profile being edited, then sync the device map and the
+    /// per-key gesture indicators.
     private func populateFields() {
         let b = (editingIndex < workingProfiles.count) ? workingProfiles[editingIndex].bindings : [:]
         for (name, field) in fields { field.stringValue = b[name] ?? "" }
         syncDevice()
+        updateGestureIndicators()
     }
 
-    /// Point the device map at the on-screen field values for the active profile.
+    /// Point the device map at the on-screen field values for the active profile, marking
+    /// keys that carry a hold/double action in this profile.
     private func syncDevice() {
         guard deviceView != nil else { return }
         var b: [String: String] = [:]
         for (name, field) in fields { b[name] = field.stringValue.trimmingCharacters(in: .whitespaces) }
         let name = (editingIndex < workingProfiles.count) ? workingProfiles[editingIndex].name : "default"
-        deviceView.update(profile: name, tint: Theme.tint(for: name), bindings: b)
+        var sec: Set<String> = []
+        if editingIndex < workingProfiles.count {
+            let p = workingProfiles[editingIndex]
+            for k in Mapping.order where !(p.hold[k] ?? "").isEmpty || !(p.double[k] ?? "").isEmpty { sec.insert(k) }
+        }
+        deviceView.update(profile: name, tint: Theme.tint(for: name), bindings: b, secondary: sec)
     }
 
     private func rebuildProfilePopup() {
@@ -629,9 +809,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     private func reload() {
         workingProfiles = mapping.profileNames().map { name in
-            let b = Dictionary(uniqueKeysWithValues:
-                mapping.bindings(forProfile: name).map { ($0.name, $0.cmd) })
-            return EditProfile(name: name, bindings: b)
+            let kb = mapping.keyBindings(forProfile: name)
+            return EditProfile(name: name, bindings: kb.tap, hold: kb.hold, double: kb.double)
         }
         if workingProfiles.isEmpty {
             workingProfiles = [EditProfile(name: "default", bindings: Mapping.defaultsDict())]
@@ -641,6 +820,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         populateFields()
         updateProfileHint()
         syncKnobOptions()
+        syncGestureOptions()
     }
 
     private func flashSaved() {

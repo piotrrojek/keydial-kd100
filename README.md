@@ -80,6 +80,12 @@ The menu bar icon's menu shows:
     its step to how fast you spin (e.g. `aerospace resize smart +$((10*KD100_DELTA))`).
     Tick **Spin to repeat** to instead run the bound command once per detent of a fast
     flick (capped by **Max repeats**).
+  - **secondary actions** — the **⋯** button on a key adds a **Hold** (long-press) and/or
+    **Double-tap** command beside its tap command, so one key can do up to three things.
+    Keys with extras show a small dot on the map and cheat-sheet. The **Gestures** block
+    tunes the hold threshold and the double-tap window. A key with neither has zero added
+    latency (it still fires on press); a double-bound key waits one window before its tap
+    resolves.
 - **Open at Login** — register/unregister as a login item (macOS 13+).
 - **Quit KD100**.
 
@@ -100,6 +106,13 @@ by hand too — the app watches the file and **picks up hand edits live** (no re
     } }
   ]
 }
+```
+
+A key's value is either a bare string (its tap command) or an object when it also has a
+long-press / double-tap action:
+
+```jsonc
+"enter": { "tap": "aerospace fullscreen", "hold": "aerospace close", "double": "aerospace layout floating" }
 ```
 
 Key names (physical layout, rows 4/4/4/4/2 — column 4 is the split-`+`):
@@ -177,6 +190,8 @@ active profile's bindings) lives in [`examples/sketchybar/`](examples/sketchybar
 - `Sources/kd100/KD100.swift` — IOKit HID open/seize, callbacks, connection-health hooks.
 - `Sources/kd100/Decode.swift` — pure `ReportDecoder` (HID report → physical events +
   edge-detection) and `KnobVelocity` (turn stream → detents/sec); no IOKit, unit-tested.
+- `Sources/kd100/GestureEngine.swift` — pure, clock-injected tap / hold / double-tap state
+  machine driven by key down/up edges + a run-loop tick; unit-tested without hardware.
 - `Sources/kd100/Mapping.swift` — layout table, config load/save + live file watch,
   login-shell command dispatch with exit/stderr capture.
 - `Sources/kd100/FileWatcher.swift` — `DispatchSource` config-file watcher.
