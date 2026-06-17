@@ -13,9 +13,9 @@
 class KeydialKd100 < Formula
   desc "Map a Huion KD100 keypad + knob to any shell command (no Huion driver)"
   homepage "https://github.com/piotrrojek/keydial-kd100"
-  url "https://github.com/piotrrojek/keydial-kd100/releases/download/v0.5.0/keydial-kd100-0.5.0-macos-universal.tar.gz"
-  sha256 "e29b279a560114aa63aff7cbdf74f022ca821411c1c1f7144ec691abd7a98842"
-  version "0.5.0"
+  url "https://github.com/piotrrojek/keydial-kd100/releases/download/v0.6.0/keydial-kd100-0.6.0-macos-universal.tar.gz"
+  sha256 "e607c0331964ab8935b10c542b143f363a3059e360bc2ededaec70e780961053"
+  version "0.6.0"
   license "MIT"
 
   depends_on :macos
