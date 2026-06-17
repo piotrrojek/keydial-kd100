@@ -13,6 +13,8 @@ let package = Package(
                 .linkedFramework("CoreFoundation"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("ServiceManagement"),
+                .linkedFramework("UserNotifications"),
+                .linkedFramework("Carbon"),
             ]
         ),
         .testTarget(

@@ -1,5 +1,7 @@
 import AppKit
+import Carbon.HIToolbox
 import Foundation
+import UserNotifications
 #if canImport(ServiceManagement)
 import ServiceManagement
 #endif
@@ -7,11 +9,14 @@ import ServiceManagement
 /// Menu-bar (tray) app. Owns the KD100 engine in `run` mode, shows live
 /// connection status, opens the Settings window, and offers Open-at-Login + Quit.
 /// No dock icon — the app runs as an accessory (LSUIElement / .accessory policy).
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private let engine = KD100(mode: .run)
     private var settings: SettingsWindowController?
     private let status = StatusExporter()   // publishes ~/.config/kd100/status.json for an external bar
+    private let hud = HUDController()        // on-screen profile-switch flash + cheat-sheet reveal
+    private var hotKey: GlobalHotKey?        // ⌥⌘K → toggle the cheat-sheet
+    private var lastShownProfile: String?    // dedupe so the HUD flashes only on a real change
 
     // Menu items kept around so callbacks can mutate their titles/state.
     private var statusLine: NSMenuItem!
@@ -25,6 +30,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = StatusIcon.menuBarImage()
         statusItem.button?.toolTip = "KD100 — Keydial controller"
         statusItem.menu = buildMenu()
+
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+
+        hotKey = GlobalHotKey(keyCode: UInt32(kVK_ANSI_K),
+                              modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            self?.toggleCheatSheet()
+        }
 
         wireEngine()
         engine.start()
@@ -55,6 +69,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+
+        let cheatItem = NSMenuItem(title: "Show Cheat-Sheet  (⌥⌘K)", action: #selector(toggleCheatSheet), keyEquivalent: "")
+        cheatItem.target = self
+        menu.addItem(cheatItem)
 
         loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
         loginItem.target = self
@@ -100,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.lastFireLine.title = "Last: \(name) → failed (\(code))"
                     + (short.isEmpty ? "" : ": \(short)")
                 NSLog("KD100: '\(name)' exited \(code)\(tail.isEmpty ? "" : ": \(tail)")")
+                self?.notifyFailure(name: name, code: code, detail: short)
             }
         }
         engine.mapping.onExternalChange = { [weak self] in
@@ -126,6 +145,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = (name == "default") ? "" : " \(name)"
         }
         status.setProfiles(active: name, all: engine.mapping.profileNames())
+        // Flash the HUD only when the active profile actually changes (a knob-press
+        // cycle) — not on initial setup or a no-op config-watch fire.
+        if let last = lastShownProfile, last != name { hud.flash(profile: name) }
+        lastShownProfile = name
     }
 
     private func apply(_ health: KD100.Health) {
@@ -172,6 +195,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    // MARK: - Cheat-sheet + failure notifications
+
+    @objc private func toggleCheatSheet() {
+        let name = engine.mapping.activeProfileName
+        var bindings: [String: String] = [:]
+        for key in Mapping.order { bindings[key] = engine.mapping.activeBinding(for: key) ?? "" }
+        hud.toggleReveal(profile: name, bindings: bindings)
+    }
+
+    private func notifyFailure(name: String, code: Int32, detail: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "kd100 — “\(name)” failed (\(code))"
+        content.body = detail.isEmpty ? "The command exited with status \(code)." : detail
+        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
+    }
+
+    // Show failure banners even though kd100 is an accessory (foreground) app.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
 
     // MARK: - Open at Login (macOS 13+)
 
