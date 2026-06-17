@@ -64,8 +64,10 @@ The menu bar icon's menu shows:
 - **Settings…** (⌘,) — a window with:
   - a **profile picker** + **Add Profile…** / **Remove** — each profile is a named binding
     set (see [Profiles](#profiles));
-  - a **visual device map** of the pad (rows 4/4/4/4/2 + knob) — click a key to jump to
-    its command field;
+  - **Export ▾** / **Import…** — save the selected profile (or all profiles) to a `.json`
+    file, and import profiles from one (shareable; also handy for backups);
+  - a **visual device map** — a faithful render of the pad; click a key to jump to its
+    field, and the map updates live as you type;
   - a **Listen** toggle — flip it on and press a key on the pad to locate it in the list
     (commands are paused while listening, so you won't trigger anything);
   - one editable field per physical key + knob action, each with a **▶ test** button that

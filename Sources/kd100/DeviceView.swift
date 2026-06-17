@@ -6,12 +6,13 @@ import AppKit
 /// **tall `Enter`** (col 4, rows 4–5), and the **wide `0`** (cols 1–2, row 5) — each
 /// labelled with its live binding, plus a knob legend along the bottom.
 ///
-/// Used by the HUD cheat-sheet reveal; intended to be reused by the Settings window in
-/// a later phase so there is one device render across the app.
+/// Static render for the HUD cheat-sheet; the same view is also the interactive map in
+/// the Settings window (`onSelect` + `flash` + a selection highlight), so there is one
+/// device render across the app.
 final class DeviceView: NSView {
     /// (key name, col, row, column-span, row-span) in the 4-wide grid. The three knob
     /// controls are drawn in the legend, not as caps.
-    private static let cells: [(name: String, col: Int, row: Int, cspan: Int, rspan: Int)] = [
+    static let cells: [(name: String, col: Int, row: Int, cspan: Int, rspan: Int)] = [
         ("numlock", 0, 0, 1, 1), ("slash", 1, 0, 1, 1), ("star", 2, 0, 1, 1), ("minus", 3, 0, 1, 1),
         ("7", 0, 1, 1, 1), ("8", 1, 1, 1, 1), ("9", 2, 1, 1, 1), ("plus-upper", 3, 1, 1, 1),
         ("4", 0, 2, 1, 1), ("5", 1, 2, 1, 1), ("6", 2, 2, 1, 1), ("plus-lower", 3, 2, 1, 1),
@@ -25,12 +26,17 @@ final class DeviceView: NSView {
     private var keysTop: CGFloat { bandH + 14 }                       // 68
     private var legendTop: CGFloat { keysTop + 5 * capH + 4 * gap + 12 }
 
-    /// Natural size of the rendered device (the HUD pads around it).
+    /// Natural size of the rendered device (callers pad around it).
     static let preferredSize = NSSize(width: 240, height: 54 + 14 + 5 * 44 + 4 * 8 + 12 + 18)
 
-    private let profile: String
-    private let tint: NSColor
-    private let bindings: [String: String]
+    private var profile: String
+    private var tint: NSColor
+    private var bindings: [String: String]
+    private var selected: String?
+    private var flashed: String?
+
+    /// Click a keycap → its name. Set by the Settings window to focus the matching field.
+    var onSelect: ((String) -> Void)?
 
     init(profile: String, tint: NSColor, bindings: [String: String]) {
         self.profile = profile
@@ -42,6 +48,32 @@ final class DeviceView: NSView {
 
     override var isFlipped: Bool { true }   // top-left origin for natural top-to-bottom layout
 
+    // MARK: - State
+
+    func update(profile: String, tint: NSColor, bindings: [String: String]) {
+        self.profile = profile; self.tint = tint; self.bindings = bindings
+        needsDisplay = true
+    }
+
+    /// Live-edit a single cap's label (Settings reflects typing as you go).
+    func updateBinding(_ name: String, _ cmd: String) {
+        bindings[name] = cmd
+        needsDisplay = true
+    }
+
+    func select(_ name: String?) { selected = name; needsDisplay = true }
+
+    /// Briefly highlight a cap to acknowledge a physical press (Listen mode).
+    func flash(_ name: String) {
+        guard DeviceView.cells.contains(where: { $0.name == name }) else { return }
+        flashed = name; needsDisplay = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            if self?.flashed == name { self?.flashed = nil; self?.needsDisplay = true }
+        }
+    }
+
+    // MARK: - Geometry
+
     private func colX(_ c: Int) -> CGFloat { CGFloat(c) * (capW + gap) }
     private func rowY(_ r: Int) -> CGFloat { keysTop + CGFloat(r) * (capH + gap) }
 
@@ -51,13 +83,24 @@ final class DeviceView: NSView {
         return NSRect(x: colX(col), y: rowY(row), width: w, height: h)
     }
 
+    private lazy var capFrames: [(name: String, rect: NSRect)] = DeviceView.cells.map {
+        ($0.name, capRect(col: $0.col, row: $0.row, cspan: $0.cspan, rspan: $0.rspan))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard let hit = capFrames.first(where: { $0.rect.contains(p) }) else { return }
+        select(hit.name)
+        onSelect?(hit.name)
+    }
+
+    // MARK: - Drawing
+
     override func draw(_ dirtyRect: NSRect) {
-        // Matte body.
         let bodyPath = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 16, yRadius: 16)
         Theme.body.setFill(); bodyPath.fill()
         Theme.bodyRim.setStroke(); bodyPath.lineWidth = 1; bodyPath.stroke()
 
-        // Metallic top band, clipped to the body's rounded top.
         NSGraphicsContext.saveGraphicsState()
         bodyPath.addClip()
         let band = NSRect(x: 0, y: 0, width: gridW, height: bandH)
@@ -67,9 +110,7 @@ final class DeviceView: NSView {
         drawDial(center: NSPoint(x: 36, y: bandH / 2), radius: 19)
         drawProfileName(in: band)
 
-        for c in DeviceView.cells {
-            drawCap(name: c.name, in: capRect(col: c.col, row: c.row, cspan: c.cspan, rspan: c.rspan))
-        }
+        for f in capFrames { drawCap(name: f.name, in: f.rect) }
         drawLegend()
     }
 
@@ -86,7 +127,6 @@ final class DeviceView: NSView {
 
     private func drawProfileName(in band: NSRect) {
         let rightPad: CGFloat = 14
-        // "kd100" caption (small) above the profile name (larger, tinted for the metal).
         let cap = "kd100" as NSString
         let capAttr: [NSAttributedString.Key: Any] = [
             .font: Theme.ui(10, .bold), .foregroundColor: NSColor(white: 0.32, alpha: 1),
@@ -98,41 +138,49 @@ final class DeviceView: NSView {
         ]
         let capSize = cap.size(withAttributes: capAttr)
         let nameSize = name.size(withAttributes: nameAttr)
-        cap.draw(at: NSPoint(x: band.maxX - rightPad - capSize.width, y: band.midY - 18),
-                 withAttributes: capAttr)
-        name.draw(at: NSPoint(x: band.maxX - rightPad - nameSize.width, y: band.midY - 2),
-                  withAttributes: nameAttr)
+        cap.draw(at: NSPoint(x: band.maxX - rightPad - capSize.width, y: band.midY - 18), withAttributes: capAttr)
+        name.draw(at: NSPoint(x: band.maxX - rightPad - nameSize.width, y: band.midY - 2), withAttributes: nameAttr)
     }
 
     private func drawCap(name: String, in r: NSRect) {
         let cmd = bindings[name] ?? ""
         let disabled = cmd.isEmpty
-        let cap = NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1),
-                               xRadius: Theme.keycapRadius, yRadius: Theme.keycapRadius)
-        (disabled ? Theme.keycap.withAlphaComponent(0.5) : Theme.keycap).setFill()
-        cap.fill()
-        Theme.keycapEdge.withAlphaComponent(disabled ? 0.3 : 1).setStroke()
-        cap.lineWidth = 1; cap.stroke()
+        let isFlash = (flashed == name)
+        let isSel = (selected == name)
 
-        // Faint key-id tag, top-left.
+        let path = NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1),
+                                xRadius: Theme.keycapRadius, yRadius: Theme.keycapRadius)
+        if isFlash {
+            tint.setFill()
+        } else {
+            (disabled ? Theme.keycap.withAlphaComponent(0.5) : Theme.keycap).setFill()
+        }
+        path.fill()
+        if isSel {
+            tint.setStroke(); path.lineWidth = 2
+        } else {
+            Theme.keycapEdge.withAlphaComponent(disabled && !isFlash ? 0.3 : 1).setStroke(); path.lineWidth = 1
+        }
+        path.stroke()
+
         let glyphAttr: [NSAttributedString.Key: Any] = [
-            .font: Theme.mono(9, .semibold), .foregroundColor: Theme.keyFaint,
+            .font: Theme.mono(9, .semibold),
+            .foregroundColor: isFlash ? NSColor.black.withAlphaComponent(0.65) : Theme.keyFaint,
         ]
-        (Theme.keyGlyph(name) as NSString).draw(at: NSPoint(x: r.minX + 7, y: r.minY + 5),
-                                                withAttributes: glyphAttr)
+        (Theme.keyGlyph(name) as NSString).draw(at: NSPoint(x: r.minX + 7, y: r.minY + 5), withAttributes: glyphAttr)
 
-        guard !disabled else { return }
-        // Action label, centered in the lower portion, truncated to fit.
+        let label = Theme.prettyBinding(cmd)
+        guard !label.isEmpty else { return }
         let para = NSMutableParagraphStyle()
         para.alignment = .center
         para.lineBreakMode = .byTruncatingTail
         let attr: [NSAttributedString.Key: Any] = [
-            .font: Theme.mono(9, .medium), .foregroundColor: Theme.keyText, .paragraphStyle: para,
+            .font: Theme.mono(9, .medium),
+            .foregroundColor: isFlash ? NSColor.black.withAlphaComponent(0.85) : Theme.keyText,
+            .paragraphStyle: para,
         ]
-        let label = Theme.prettyBinding(cmd) as NSString
-        let textRect = NSRect(x: r.minX + 4, y: r.minY + r.height / 2 - 8,
-                              width: r.width - 8, height: r.height / 2)
-        label.draw(in: textRect, withAttributes: attr)
+        let textRect = NSRect(x: r.minX + 4, y: r.minY + r.height / 2 - 8, width: r.width - 8, height: r.height / 2)
+        (label as NSString).draw(in: textRect, withAttributes: attr)
     }
 
     private func drawLegend() {
@@ -145,7 +193,6 @@ final class DeviceView: NSView {
         let attr: [NSAttributedString.Key: Any] = [
             .font: Theme.mono(9, .medium), .foregroundColor: Theme.keyFaint, .paragraphStyle: para,
         ]
-        (line as NSString).draw(in: NSRect(x: 4, y: legendTop, width: gridW - 8, height: 16),
-                                withAttributes: attr)
+        (line as NSString).draw(in: NSRect(x: 4, y: legendTop, width: gridW - 8, height: 16), withAttributes: attr)
     }
 }

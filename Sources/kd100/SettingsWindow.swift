@@ -1,66 +1,18 @@
 import AppKit
+import UniformTypeIdentifiers
 
-/// A single key in the visual keypad map. Layer-backed so it can flash when the
-/// matching physical key is pressed; clicking it focuses that key's command field.
-final class KeyCell: NSView {
-    let name: String
-    var onClick: (() -> Void)?
-    private let title = NSTextField(labelWithString: "")
-
-    init(name: String, label: String) {
-        self.name = name
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 6
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-
-        title.stringValue = label
-        title.alignment = .center
-        title.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
-        title.textColor = .labelColor
-        title.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(title)
-
-        translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 88),
-            heightAnchor.constraint(equalToConstant: 34),
-            title.centerXAnchor.constraint(equalTo: centerXAnchor),
-            title.centerYAnchor.constraint(equalTo: centerYAnchor),
-            title.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4),
-        ])
-
-        addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(clicked)))
-        toolTip = name
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
-
-    @objc private func clicked() { onClick?() }
-
-    /// Briefly highlight to acknowledge a physical press (press-to-identify).
-    func flash() {
-        layer?.backgroundColor = NSColor.controlAccentColor.cgColor
-        title.textColor = .white
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            self?.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            self?.title.textColor = .labelColor
-        }
-    }
-}
-
-/// Settings window: a visual device map up top (click a key to jump to it; turn on
-/// Listen and press a key to locate it) over a scrollable list of one editable
-/// command field per physical key + knob action, each with a ▶ test button.
+/// Settings window: the faithful device map up top (click a key to edit it; turn on
+/// Listen and press a key to locate it) over a scrollable list of one editable command
+/// field per physical key + knob action, each with a ▶ test button. The map reflects
+/// the bindings live as you type, and follows the profile picker.
 ///
-/// Save writes `~/.config/kd100/mapping.json` and applies live (the engine shares
-/// this same Mapping instance). Leaving a field blank disables that key.
-final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+/// Save writes `~/.config/kd100/mapping.json` and applies live (the engine shares this
+/// same Mapping instance). Leaving a field blank disables that key. Profiles can be
+/// exported (one, or all) and imported from `.json` files.
+final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private let mapping: Mapping
     private var fields: [String: NSTextField] = [:]
-    private var cells: [String: KeyCell] = [:]
+    private var deviceView: DeviceView!
     private var savedLabel: NSTextField!
     private var listenButton: NSButton!
     private var listenHint: NSTextField!
@@ -83,11 +35,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     init(mapping: Mapping) {
         self.mapping = mapping
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = "KD100 — Key Mapping"
-        window.minSize = NSSize(width: 520, height: 540)
+        window.minSize = NSSize(width: 520, height: 600)
         window.center()
         super.init(window: window)
         window.delegate = self
@@ -100,9 +52,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Engine hooks (called from AppDelegate on the main queue)
 
-    /// A physical control fired: flash its cell, and in Listen mode jump to its field.
+    /// A physical control fired: flash its cap on the map, and in Listen mode jump to
+    /// its field.
     func controlFired(_ name: String) {
-        cells[name]?.flash()
+        deviceView.flash(name)
         if listening { focusField(name) }
     }
 
@@ -114,12 +67,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func buildUI() {
         guard let content = window?.contentView else { return }
 
-        // --- Fixed top: help + profile picker + device map + Listen toggle ---
         let help = makeHelp(
             "Each key runs the command below via your login shell ($SHELL -ilc), so it sees the "
-            + "same PATH/tools a Terminal does. Commands aren't limited to aerospace — use open, "
-            + "osascript, scripts, anything. Blank = disabled. ▶ tests a command now; Save applies "
-            + "everything immediately.")
+            + "same PATH/tools a Terminal does — use aerospace, open, osascript, scripts, anything. "
+            + "Click a key on the map to jump to it; the map updates as you type. Blank = disabled. "
+            + "▶ tests a command now; Save applies everything immediately.")
 
         let profileBar = buildProfileBar()
         profileHint = NSTextField(labelWithString: "")
@@ -129,7 +81,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         profileHint.translatesAutoresizingMaskIntoConstraints = false
 
         let mapTitle = makeSectionHeader("Device map — click a key to edit it")
-        let keypad = buildKeypadMap()
+        deviceView = DeviceView(profile: "default", tint: Theme.tint(for: "default"), bindings: [:])
+        deviceView.translatesAutoresizingMaskIntoConstraints = false
+        deviceView.onSelect = { [weak self] name in self?.focusField(name) }
+        NSLayoutConstraint.activate([
+            deviceView.widthAnchor.constraint(equalToConstant: DeviceView.preferredSize.width),
+            deviceView.heightAnchor.constraint(equalToConstant: DeviceView.preferredSize.height),
+        ])
 
         listenButton = NSButton(checkboxWithTitle: "Listen — press a key on the pad to locate it (commands paused)",
                                 target: self, action: #selector(toggleListen(_:)))
@@ -139,13 +97,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         listenHint.textColor = .secondaryLabelColor
         listenHint.translatesAutoresizingMaskIntoConstraints = false
 
-        let topStack = NSStackView(views: [help, profileBar, profileHint, mapTitle, keypad, listenButton, listenHint])
+        let topStack = NSStackView(views: [help, profileBar, profileHint, mapTitle, deviceView, listenButton, listenHint])
         topStack.orientation = .vertical
         topStack.alignment = .leading
         topStack.spacing = 8
         topStack.translatesAutoresizingMaskIntoConstraints = false
         topStack.setCustomSpacing(12, after: profileHint)
-        topStack.setCustomSpacing(12, after: keypad)
+        topStack.setCustomSpacing(12, after: deviceView)
         content.addSubview(topStack)
 
         // --- Bottom action bar ---
@@ -181,7 +139,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         form.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
 
         form.addArrangedSubview(makeSectionHeader("Keys"))
-        for (name, _) in mapping.current() where !Mapping.knobNames.contains(name) {
+        for name in Mapping.order where !Mapping.knobNames.contains(name) {
             form.addArrangedSubview(makeRow(name))
         }
         form.addArrangedSubview(makeSectionHeader("Knob"))
@@ -228,8 +186,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         help.preferredMaxLayoutWidth = 540
     }
 
-    /// Profile picker row: [Profile: ▾] [Add Profile…] [Remove]. Selecting a profile
-    /// swaps which binding set the fields below show/edit.
+    /// Profile row: [Profile: ▾] [Add Profile…] [Remove] … [Export ▾] [Import…].
     private func buildProfileBar() -> NSView {
         let label = NSTextField(labelWithString: "Profile:")
         label.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -239,14 +196,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         profilePopup.target = self
         profilePopup.action = #selector(profileChanged(_:))
         profilePopup.translatesAutoresizingMaskIntoConstraints = false
-        profilePopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let addButton = makeButton("Add Profile…", #selector(addProfileTapped))
         addButton.toolTip = "Create a named profile (a copy of default) you cycle to with the knob press"
         removeButton = makeButton("Remove", #selector(removeProfileTapped))
-        removeButton.toolTip = "Delete the selected app profile (the default profile can't be removed)"
+        removeButton.toolTip = "Delete the selected profile (the default profile can't be removed)"
 
-        let bar = NSStackView(views: [label, profilePopup, addButton, removeButton])
+        let exportPopup = NSPopUpButton(frame: .zero, pullsDown: true)
+        exportPopup.addItems(withTitles: ["Export", "This profile…", "All profiles…"])
+        exportPopup.target = self
+        exportPopup.action = #selector(exportSelected(_:))
+        exportPopup.toolTip = "Save the selected profile, or all profiles, to a .json file"
+        exportPopup.translatesAutoresizingMaskIntoConstraints = false
+
+        let importButton = makeButton("Import…", #selector(importTapped))
+        importButton.toolTip = "Add profiles from a .json file (kept as a working copy until you Save)"
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let bar = NSStackView(views: [label, profilePopup, addButton, removeButton, spacer, exportPopup, importButton])
         bar.orientation = .horizontal
         bar.spacing = 8
         bar.alignment = .firstBaseline
@@ -254,46 +225,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         return bar
     }
 
-    /// The visual keypad: rows 4/4/4/4/2 then a centered knob trio.
-    private func buildKeypadMap() -> NSView {
-        let rows: [[String]] = [
-            ["numlock", "slash", "star", "minus"],
-            ["7", "8", "9", "plus-upper"],
-            ["4", "5", "6", "plus-lower"],
-            ["1", "2", "3", "enter"],
-            ["0", "dot"],
-        ]
-        let grid = NSGridView()
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        grid.rowSpacing = 6
-        grid.columnSpacing = 6
-        for r in rows {
-            var views: [NSView] = []
-            for c in 0..<4 { views.append(c < r.count ? makeCell(r[c]) : NSView()) }
-            grid.addRow(with: views)
-        }
-
-        let knob = NSGridView()
-        knob.translatesAutoresizingMaskIntoConstraints = false
-        knob.columnSpacing = 6
-        knob.addRow(with: ["knob-ccw", "knob-press", "knob-cw"].map { makeCell($0) })
-
-        let stack = NSStackView(views: [grid, makeSectionHeader("Knob"), knob])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        return stack
-    }
-
-    private func makeCell(_ name: String) -> KeyCell {
-        let cell = KeyCell(name: name, label: SettingsWindowController.cellLabel(name))
-        cell.onClick = { [weak self] in self?.focusField(name) }
-        cells[name] = cell
-        return cell
-    }
-
-    /// Short glyph for the keypad map; the internal name is still the tooltip.
+    /// Short glyph for a key name (kept for compatibility / tests; the device map now
+    /// renders the caps directly).
     static func cellLabel(_ name: String) -> String {
         switch name {
         case "slash": return "/"
@@ -338,6 +271,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         field.translatesAutoresizingMaskIntoConstraints = false
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.identifier = NSUserInterfaceItemIdentifier(name)   // so live edits map back to the key
+        field.delegate = self
         fields[name] = field
 
         let test = NSButton(title: "▶", target: self, action: #selector(testTapped(_:)))
@@ -380,10 +315,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func focusField(_ name: String) {
+        deviceView.select(name)
         guard let field = fields[name] else { return }
         window?.makeFirstResponder(field)
         field.selectText(nil)
         field.scrollToVisible(field.bounds)
+    }
+
+    // MARK: - Live edit → device map
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, let name = field.identifier?.rawValue else { return }
+        deviceView.updateBinding(name, field.stringValue.trimmingCharacters(in: .whitespaces))
     }
 
     // MARK: - Actions
@@ -422,6 +365,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func resetTapped() {
         let defaults = Mapping.defaultsDict()
         for (name, field) in fields { field.stringValue = defaults[name] ?? "" }
+        syncDevice()
         let who = workingProfiles.isEmpty ? "default" : workingProfiles[editingIndex].name
         savedLabel.stringValue = "Defaults loaded for \(who) — press Save to apply"
     }
@@ -479,6 +423,73 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         savedLabel.stringValue = "Removed \(removed.name) — Save to apply"
     }
 
+    // MARK: - Export / import
+
+    @objc private func exportSelected(_ sender: NSPopUpButton) {
+        captureFields()
+        switch sender.indexOfSelectedItem {
+        case 1: exportProfile(all: false)
+        case 2: exportProfile(all: true)
+        default: break
+        }
+    }
+
+    private func exportProfile(all: Bool) {
+        guard let window, editingIndex < workingProfiles.count else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = all
+            ? "kd100-mapping.json"
+            : "\(workingProfiles[editingIndex].name).kd100profile.json"
+        panel.beginSheetModal(for: window) { [weak self] resp in
+            guard resp == .OK, let url = panel.url, let self else { return }
+            let data: Data = all
+                ? ProfileIO.encodeAll(self.workingProfiles.map { ($0.name, $0.bindings) })
+                : ProfileIO.encodeProfile(name: self.workingProfiles[self.editingIndex].name,
+                                          bindings: self.workingProfiles[self.editingIndex].bindings)
+            do {
+                try data.write(to: url)
+                self.savedLabel.stringValue = "Exported \(url.lastPathComponent)"
+            } catch {
+                self.savedLabel.stringValue = "Export failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    @objc private func importTapped() {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.beginSheetModal(for: window) { [weak self] resp in
+            guard let self else { return }
+            guard resp == .OK, let url = panel.url,
+                  let data = try? Data(contentsOf: url),
+                  let incoming = ProfileIO.decode(data), !incoming.isEmpty else {
+                self.savedLabel.stringValue = "Import failed — not a kd100 profile file"
+                return
+            }
+            self.captureFields()
+            var added = 0, updated = 0
+            for prof in incoming {
+                if let i = self.workingProfiles.firstIndex(where: { $0.name.caseInsensitiveCompare(prof.name) == .orderedSame }) {
+                    if prof.name == "default" {
+                        for (k, v) in prof.bindings { self.workingProfiles[i].bindings[k] = v }   // merge into default
+                    } else {
+                        self.workingProfiles[i].bindings = prof.bindings                            // replace same-named
+                    }
+                    updated += 1
+                } else {
+                    self.workingProfiles.append(EditProfile(name: self.uniqueName(prof.name), bindings: prof.bindings))
+                    added += 1
+                }
+            }
+            self.editingIndex = min(self.editingIndex, self.workingProfiles.count - 1)
+            self.rebuildProfilePopup(); self.populateFields(); self.updateProfileHint()
+            self.savedLabel.stringValue = "Imported: \(added) added, \(updated) updated — Save to apply"
+        }
+    }
+
     /// A profile name unique within the current working set (and never "default").
     private func uniqueName(_ base: String) -> String {
         var stem = base.isEmpty ? "Profile" : base
@@ -502,10 +513,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         workingProfiles[editingIndex].bindings = b
     }
 
-    /// Fill the fields from the profile being edited.
+    /// Fill the fields from the profile being edited, then sync the device map.
     private func populateFields() {
         let b = (editingIndex < workingProfiles.count) ? workingProfiles[editingIndex].bindings : [:]
         for (name, field) in fields { field.stringValue = b[name] ?? "" }
+        syncDevice()
+    }
+
+    /// Point the device map at the on-screen field values for the active profile.
+    private func syncDevice() {
+        guard deviceView != nil else { return }
+        var b: [String: String] = [:]
+        for (name, field) in fields { b[name] = field.stringValue.trimmingCharacters(in: .whitespaces) }
+        let name = (editingIndex < workingProfiles.count) ? workingProfiles[editingIndex].name : "default"
+        deviceView.update(profile: name, tint: Theme.tint(for: name), bindings: b)
     }
 
     private func rebuildProfilePopup() {
