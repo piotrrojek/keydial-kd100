@@ -84,7 +84,7 @@ final class Mapping {
         Dictionary(uniqueKeysWithValues: Mapping.defaults.map { ($0.name, $0.cmd) })
     }
 
-    static let configNote = "Profiles: \"default\" plus any named profiles you add. Switch between them manually with the knob press — it cycles default -> next -> default and is reserved app-wide, so it never runs a command. Within a profile, key = KD100 physical key (numlock slash star minus / 7 8 9 plus-upper / 4 5 6 plus-lower / 1 2 3 enter / 0 dot / knob-cw knob-ccw knob-press); value = shell command run via your login shell ($SHELL -ilc). A key omitted from a profile falls through to \"default\"; a key set to \"\" is disabled there. knob-cw/knob-ccw commands always see $KD100_DELTA (this turn's magnitude) and $KD100_VELOCITY (smoothed detents/sec) in their environment. Top-level knobSpinRepeat (true/false) makes a fast spin run the knob command up to knobMaxRepeat times. Edit in the menu-bar app's Settings window (applies live), or edit here — changes are picked up live."
+    static let configNote = "Profiles: \"default\" plus any named profiles you add. Switch between them manually with the knob press — it cycles default -> next -> default and is reserved app-wide, so it never runs a command. Within a profile, key = KD100 physical key (numlock slash star minus / 7 8 9 plus-upper / 4 5 6 plus-lower / 1 2 3 enter / 0 dot / knob-cw knob-ccw knob-press); value = shell command run via your login shell ($SHELL -ilc). A key omitted from a profile falls through to \"default\"; a key set to \"\" is disabled there. A key's value can be a string (its tap command) or an object {\"tap\":..., \"hold\":..., \"double\":...} to add a long-press and/or double-tap action (top-level holdMs / doubleTapMs tune the timing). A command of \"@toggle <profile>\" flips to that profile (a layer) and back, \"@profile <profile>\" switches to it, \"@cycle\" cycles — so a key can act as a layer toggle. knob-cw/knob-ccw commands always see $KD100_DELTA (this turn's magnitude) and $KD100_VELOCITY (smoothed detents/sec) in their environment. Top-level knobSpinRepeat (true/false) makes a fast spin run the knob command up to knobMaxRepeat times. Edit in the menu-bar app's Settings window (applies live), or edit here — changes are picked up live."
 
     /// One named binding set. Profiles are cycled manually by the knob press.
     ///
@@ -113,6 +113,8 @@ final class Mapping {
     /// Index of the manually-selected active profile (guarded by `lock`). Advanced by
     /// the profile-switch control (the knob press).
     private var _activeIndex = 0
+    /// The profile active before the last switch, so `@toggle` can flip back (guarded by `lock`).
+    private var _previousIndex = 0
     let path: String
 
     /// Fired whenever a control is activated, on the HID callback thread. `cmd` is
@@ -209,6 +211,31 @@ final class Mapping {
     /// the tray reflects the change. (Chosen: the knob press.)
     static let profileSwitchControl = "knob-press"
 
+    /// A **profile action** a key can be bound to (instead of a shell command), giving the
+    /// "tap-to-toggle layer" behavior: bind a key's tap to `@toggle <name>` and it flips to
+    /// that profile (a "layer") and back. (Hold-as-layer is hardware-impossible — a held key
+    /// blocks all other keys — so toggling is the only viable layer model; see the probe.)
+    enum ProfileAction: Equatable {
+        case cycle              // "@cycle" / "@cycle-profile" — like the knob press
+        case switchTo(String)   // "@profile <name>" — go to that profile (absolute)
+        case toggle(String)     // "@toggle <name>" — flip between that profile and the previous
+    }
+
+    /// Parse a bound command as a profile action, or nil if it's an ordinary shell command.
+    static func parseAction(_ command: String) -> ProfileAction? {
+        let s = command.trimmingCharacters(in: .whitespaces)
+        if s == "@cycle" || s == "@cycle-profile" { return .cycle }
+        if s.hasPrefix("@profile ") {
+            let n = String(s.dropFirst("@profile ".count)).trimmingCharacters(in: .whitespaces)
+            return n.isEmpty ? nil : .switchTo(n)
+        }
+        if s.hasPrefix("@toggle ") {
+            let n = String(s.dropFirst("@toggle ".count)).trimmingCharacters(in: .whitespaces)
+            return n.isEmpty ? nil : .toggle(n)
+        }
+        return nil
+    }
+
     /// Active index clamped into range. Lock held.
     private func safeActiveIndexLocked() -> Int {
         if profiles.isEmpty { return 0 }
@@ -224,11 +251,53 @@ final class Mapping {
     func cycleProfile() -> String {
         let name: String = withLock {
             guard !profiles.isEmpty else { return "default" }
+            _previousIndex = safeActiveIndexLocked()
             _activeIndex = (safeActiveIndexLocked() + 1) % profiles.count
             return profiles[_activeIndex].name
         }
         onActiveProfileChange?(name)
         return name
+    }
+
+    /// Switch to a named profile (absolute). No-op if it doesn't exist or is already active.
+    func switchToProfile(named name: String) {
+        let newName: String? = withLock {
+            guard let idx = profiles.firstIndex(where: { $0.name == name }), idx != safeActiveIndexLocked()
+            else { return nil }
+            _previousIndex = safeActiveIndexLocked()
+            _activeIndex = idx
+            return profiles[idx].name
+        }
+        if let newName { onActiveProfileChange?(newName) }
+    }
+
+    /// Flip between a named profile (a "layer") and whatever was active before it: if that
+    /// profile is active, go back to the previous one; otherwise switch to it.
+    func toggleProfile(named name: String) {
+        let newName: String? = withLock {
+            let cur = safeActiveIndexLocked()
+            if profiles[cur].name == name {
+                let prev = min(max(_previousIndex, 0), profiles.count - 1)
+                guard prev != cur else { return nil }
+                _activeIndex = prev
+                return profiles[_activeIndex].name
+            } else {
+                guard let idx = profiles.firstIndex(where: { $0.name == name }) else { return nil }
+                _previousIndex = cur
+                _activeIndex = idx
+                return profiles[idx].name
+            }
+        }
+        if let newName { onActiveProfileChange?(newName) }
+    }
+
+    /// Run a profile action (from a key bound to `@cycle` / `@profile …` / `@toggle …`).
+    private func perform(_ action: ProfileAction) {
+        switch action {
+        case .cycle:            cycleProfile()
+        case .switchTo(let n):  switchToProfile(named: n)
+        case .toggle(let n):    toggleProfile(named: n)
+        }
     }
 
     /// The command the *active* profile binds to `name`, falling through to the
@@ -552,6 +621,13 @@ final class Mapping {
     /// it's blank). `repeatCount > 1` runs the command that many times **in one shell**
     /// (`cmd ; cmd ; …`) so the steps stay ordered.
     private func run(name: String, command: String?, env: [String: String]? = nil, repeatCount: Int = 1) {
+        // A profile action (@cycle / @profile / @toggle) switches profiles instead of
+        // spawning a shell — this is how a key becomes a "layer" toggle.
+        if let cmd = command, let action = Mapping.parseAction(cmd) {
+            onControl?(name, cmd, !identifyMode)
+            if !identifyMode { perform(action) }
+            return
+        }
         let willRun = !identifyMode && (command?.isEmpty == false)
         onControl?(name, command, willRun)
         guard willRun, let cmd = command else { return }

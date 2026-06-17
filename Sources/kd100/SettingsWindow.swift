@@ -89,7 +89,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             "Each key runs the command below via your login shell ($SHELL -ilc), so it sees the "
             + "same PATH/tools a Terminal does — use aerospace, open, osascript, scripts, anything. "
             + "Click a key on the map to jump to it; the map updates as you type. Blank = disabled. "
-            + "▶ tests a command now; Save applies everything immediately.")
+            + "▶ tests a command now; Save applies everything immediately. Tip: a command of "
+            + "“@toggle <profile>” turns a key into a layer toggle (also @profile <name> / @cycle).")
 
         let profileBar = buildProfileBar()
         profileHint = NSTextField(labelWithString: "")

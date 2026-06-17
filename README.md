@@ -138,6 +138,20 @@ and a key set to `""` is disabled in that profile.
 **active profile name shows next to the menu-bar dial icon** (blank for `default`).
 Switching is manual — there's no automatic per-app switching.
 
+### Layers (tap-to-toggle)
+
+A key can switch profiles instead of running a command, which makes any profile a **layer**
+you flip into and out of. Bind a key's command to:
+
+- `@toggle <profile>` — flip to that profile, and (because the key falls through to its
+  `default` binding while the layer is active) flip back on the next press. This is the
+  "Fn layer" you tap on and off.
+- `@profile <profile>` — switch to that profile (absolute).
+- `@cycle` — cycle to the next profile, exactly like the knob press.
+
+These work for a key's tap, hold, or double-tap. (A *held* layer isn't possible — on this
+hardware a held key blocks every other key — so tap-to-toggle is the layer model.)
+
 A worked example — driving cTrader for Mac (chart control, trades, live P&L) through a
 cTrader Automate plugin — is in [`examples/ctrader/`](examples/ctrader/).
 

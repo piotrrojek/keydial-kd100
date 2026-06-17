@@ -77,6 +77,10 @@ enum Theme {
     static func prettyBinding(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespaces)
         guard !s.isEmpty else { return "" }
+        // Profile actions read as a short label, not a raw command.
+        if s == "@cycle" || s == "@cycle-profile" { return "↻ profiles" }
+        if s.hasPrefix("@toggle ") { return "⤬ " + String(s.dropFirst("@toggle ".count)).trimmingCharacters(in: .whitespaces) }
+        if s.hasPrefix("@profile ") { return "→ " + String(s.dropFirst("@profile ".count)).trimmingCharacters(in: .whitespaces) }
         s = s.replacingOccurrences(of: "\"", with: "")
         for p in ["$HOME/.config/kd100/scripts/", "~/.config/kd100/scripts/"] {
             s = s.replacingOccurrences(of: p, with: "")

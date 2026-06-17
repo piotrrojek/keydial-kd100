@@ -313,4 +313,54 @@ final class MappingTests: XCTestCase {
         m.replaceAllProfiles([("default", Mapping.defaultsDict())])   // tap-only overload
         XCTAssertNil(m.activeHold(for: "enter"))
     }
+
+    // MARK: - Layer / profile actions (Phase 5)
+
+    func testProfileActionParsing() {
+        XCTAssertEqual(Mapping.parseAction("@cycle"), .cycle)
+        XCTAssertEqual(Mapping.parseAction("@cycle-profile"), .cycle)
+        XCTAssertEqual(Mapping.parseAction("@toggle cTrader"), .toggle("cTrader"))
+        XCTAssertEqual(Mapping.parseAction("@profile  Term "), .switchTo("Term"))
+        XCTAssertNil(Mapping.parseAction("@toggle "))                  // needs a name
+        XCTAssertNil(Mapping.parseAction("aerospace workspace 1"))     // ordinary command
+    }
+
+    func testKeyBoundToToggleSwitchesLayerAndBack() {
+        let m = Mapping(path: configPath)
+        m.replaceAllProfiles([
+            Mapping.ProfileBindings(name: "default", tap: ["1": "@toggle Layer"]),
+            Mapping.ProfileBindings(name: "Layer", tap: [:]),   // key 1 falls through to default
+        ])
+        XCTAssertEqual(m.activeProfileName, "default")
+        m.dispatchGesture(name: "1", gesture: .tap)               // → layer
+        XCTAssertEqual(m.activeProfileName, "Layer")
+        m.dispatchGesture(name: "1", gesture: .tap)               // fall-through @toggle → back
+        XCTAssertEqual(m.activeProfileName, "default")
+    }
+
+    func testSwitchToProfileActionIsAbsolute() {
+        let m = Mapping(path: configPath)
+        m.replaceAllProfiles([
+            Mapping.ProfileBindings(name: "default", tap: ["1": "@profile Term"]),
+            Mapping.ProfileBindings(name: "Term", tap: [:]),
+        ])
+        m.dispatchGesture(name: "1", gesture: .tap)
+        XCTAssertEqual(m.activeProfileName, "Term")
+        m.dispatchGesture(name: "1", gesture: .tap)               // already there → no-op
+        XCTAssertEqual(m.activeProfileName, "Term")
+    }
+
+    func testProfileActionDoesNotExecuteInListenMode() {
+        let m = Mapping(path: configPath)
+        m.replaceAllProfiles([
+            Mapping.ProfileBindings(name: "default", tap: ["1": "@toggle Layer"]),
+            Mapping.ProfileBindings(name: "Layer", tap: [:]),
+        ])
+        m.identifyMode = true
+        var reported: [String?] = []
+        m.onControl = { _, cmd, _ in reported.append(cmd) }
+        m.dispatchGesture(name: "1", gesture: .tap)
+        XCTAssertEqual(m.activeProfileName, "default")            // not switched while listening
+        XCTAssertEqual(reported, ["@toggle Layer"])              // but still reported for locating
+    }
 }
