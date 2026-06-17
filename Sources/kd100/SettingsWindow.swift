@@ -18,6 +18,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private var listenHint: NSTextField!
     private var listening = false
 
+    // Knob velocity / continuous-mode controls (global, not per-profile).
+    private var spinCheckbox: NSButton!
+    private var maxRepeatStepper: NSStepper!
+    private var maxRepeatValue: NSTextField!
+    private var maxRepeatRow: NSStackView!
+
     /// Called after the profile set is committed (Save), so the tray app can refresh
     /// the active-profile menu line.
     var onProfilesChanged: (() -> Void)?
@@ -146,6 +152,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         for name in Mapping.order where Mapping.knobNames.contains(name) {
             form.addArrangedSubview(makeRow(name))
         }
+        form.setCustomSpacing(14, after: form.arrangedSubviews.last!)
+        form.addArrangedSubview(makeKnobOptions())
 
         let pathLabel = NSTextField(labelWithString: mapping.path)
         pathLabel.textColor = .tertiaryLabelColor
@@ -290,6 +298,72 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return row
     }
 
+    /// The knob velocity / continuous-mode block: a "Spin to repeat" checkbox and a
+    /// max-repeats stepper, plus a hint that the env vars are always available.
+    private func makeKnobOptions() -> NSView {
+        spinCheckbox = NSButton(checkboxWithTitle: "Spin to repeat — a fast turn runs the knob command several times",
+                                target: self, action: #selector(spinToggled(_:)))
+        spinCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        spinCheckbox.toolTip = "When on, one quick flick of the knob fires the command once per detent (capped below)."
+
+        let maxLabel = NSTextField(labelWithString: "Max repeats:")
+        maxLabel.font = .systemFont(ofSize: 12)
+        maxLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        maxRepeatStepper = NSStepper()
+        maxRepeatStepper.minValue = 1
+        maxRepeatStepper.maxValue = 20
+        maxRepeatStepper.increment = 1
+        maxRepeatStepper.valueWraps = false
+        maxRepeatStepper.target = self
+        maxRepeatStepper.action = #selector(maxRepeatChanged(_:))
+        maxRepeatStepper.translatesAutoresizingMaskIntoConstraints = false
+
+        maxRepeatValue = NSTextField(labelWithString: "4")
+        maxRepeatValue.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        maxRepeatValue.alignment = .right
+        maxRepeatValue.translatesAutoresizingMaskIntoConstraints = false
+        maxRepeatValue.widthAnchor.constraint(equalToConstant: 22).isActive = true
+
+        maxRepeatRow = NSStackView(views: [maxLabel, maxRepeatValue, maxRepeatStepper])
+        maxRepeatRow.orientation = .horizontal
+        maxRepeatRow.spacing = 6
+        maxRepeatRow.alignment = .centerY
+        maxRepeatRow.translatesAutoresizingMaskIntoConstraints = false
+        maxRepeatRow.edgeInsets = NSEdgeInsets(top: 0, left: 18, bottom: 0, right: 0)
+
+        let hint = NSTextField(wrappingLabelWithString:
+            "knob-cw / knob-ccw commands always see $KD100_DELTA (this turn’s magnitude) and "
+            + "$KD100_VELOCITY (smoothed detents/sec) — e.g. aerospace resize smart +$((10*KD100_DELTA)).")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        hint.preferredMaxLayoutWidth = 520
+
+        let stack = NSStackView(views: [spinCheckbox, maxRepeatRow, hint])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    @objc private func spinToggled(_ sender: NSButton) {
+        maxRepeatRow.isHidden = (sender.state != .on)
+    }
+
+    @objc private func maxRepeatChanged(_ sender: NSStepper) {
+        maxRepeatValue.stringValue = String(sender.integerValue)
+    }
+
+    /// Reflect the live knob options into the controls (called from `reload`).
+    private func syncKnobOptions() {
+        spinCheckbox.state = mapping.knobSpinRepeat ? .on : .off
+        maxRepeatStepper.integerValue = mapping.knobMaxRepeat
+        maxRepeatValue.stringValue = String(mapping.knobMaxRepeat)
+        maxRepeatRow.isHidden = !mapping.knobSpinRepeat
+    }
+
     private func makeSectionHeader(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text.uppercased())
         label.font = .systemFont(ofSize: 11, weight: .semibold)
@@ -357,6 +431,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     @objc private func saveTapped() {
         captureFields()
+        // Knob options are global — set them before the profile write so it persists once.
+        mapping.knobSpinRepeat = (spinCheckbox.state == .on)
+        mapping.knobMaxRepeat = maxRepeatStepper.integerValue
         mapping.replaceAllProfiles(workingProfiles.map { ($0.name, $0.bindings) })
         onProfilesChanged?()
         flashSaved()
@@ -563,6 +640,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         rebuildProfilePopup()
         populateFields()
         updateProfileHint()
+        syncKnobOptions()
     }
 
     private func flashSaved() {

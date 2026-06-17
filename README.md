@@ -74,6 +74,12 @@ The menu bar icon's menu shows:
     runs the current command immediately and reports the result;
   - **Save** applies everything live (no restart); blank = disabled key; **Reset to
     Defaults** restores the AeroSpace example set.
+  - a **knob velocity** block — `knob-cw` / `knob-ccw` commands always see
+    `$KD100_DELTA` (how far this report turned — the device encodes spin speed as a
+    bigger number) and `$KD100_VELOCITY` (smoothed detents/sec), so a script can scale
+    its step to how fast you spin (e.g. `aerospace resize smart +$((10*KD100_DELTA))`).
+    Tick **Spin to repeat** to instead run the bound command once per detent of a fast
+    flick (capped by **Max repeats**).
 - **Open at Login** — register/unregister as a login item (macOS 13+).
 - **Quit KD100**.
 
@@ -150,9 +156,11 @@ active profile's bindings) lives in [`examples/sketchybar/`](examples/sketchybar
   (`kb:MM:KK` keyboard / `cc:UU` consumer / `dial:*` knob) → human names; the JSON
   maps those names → commands. The cryptic ids never reach the config file.
 - **HID protocol:** buttons = report id 3 (keyboard) + id 1 (consumer); knob = vendor
-  report id 17 — `byte2` is a signed delta (`+1` CW / `0xff` CCW), press = `byte1`
-  bit `0x01`. Decoding + press edge-detection live in a pure `ReportDecoder`
-  (`Decode.swift`) with no IOKit dependency, so they're unit-tested without hardware.
+  report id 17 — `byte2` is a signed delta (`+1` CW / `0xff` CCW, **larger magnitude =
+  faster spin**), press = `byte1` bit `0x01`. A pure `ReportDecoder` (`Decode.swift`,
+  no IOKit) turns each report into physical events (`keyDown`/`keyUp`/`knobTurn`/
+  `knobPress`/`knobRelease`) with edge-detection, and a pure `KnobVelocity` smooths the
+  turn stream into detents/sec — both unit-tested without hardware.
 - **Execution:** commands run via `$SHELL -ilc` on a background queue; a
   `terminationHandler` captures exit status + stderr (filtering the harmless
   interactive-zsh `zle` warnings) without blocking, so failures surface and a
@@ -167,8 +175,8 @@ active profile's bindings) lives in [`examples/sketchybar/`](examples/sketchybar
 
 - `Sources/kd100/main.swift` — entry / arg parsing (`app` | `run` | `capture`).
 - `Sources/kd100/KD100.swift` — IOKit HID open/seize, callbacks, connection-health hooks.
-- `Sources/kd100/Decode.swift` — pure `ReportDecoder` (HID report → control id + press
-  edge-detection); no IOKit, fully unit-tested.
+- `Sources/kd100/Decode.swift` — pure `ReportDecoder` (HID report → physical events +
+  edge-detection) and `KnobVelocity` (turn stream → detents/sec); no IOKit, unit-tested.
 - `Sources/kd100/Mapping.swift` — layout table, config load/save + live file watch,
   login-shell command dispatch with exit/stderr capture.
 - `Sources/kd100/FileWatcher.swift` — `DispatchSource` config-file watcher.

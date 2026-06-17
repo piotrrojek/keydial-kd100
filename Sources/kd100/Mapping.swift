@@ -84,7 +84,7 @@ final class Mapping {
         Dictionary(uniqueKeysWithValues: Mapping.defaults.map { ($0.name, $0.cmd) })
     }
 
-    static let configNote = "Profiles: \"default\" plus any named profiles you add. Switch between them manually with the knob press — it cycles default -> next -> default and is reserved app-wide, so it never runs a command. Within a profile, key = KD100 physical key (numlock slash star minus / 7 8 9 plus-upper / 4 5 6 plus-lower / 1 2 3 enter / 0 dot / knob-cw knob-ccw knob-press); value = shell command run via your login shell ($SHELL -ilc). A key omitted from a profile falls through to \"default\"; a key set to \"\" is disabled there. Edit in the menu-bar app's Settings window (applies live), or edit here — changes are picked up live."
+    static let configNote = "Profiles: \"default\" plus any named profiles you add. Switch between them manually with the knob press — it cycles default -> next -> default and is reserved app-wide, so it never runs a command. Within a profile, key = KD100 physical key (numlock slash star minus / 7 8 9 plus-upper / 4 5 6 plus-lower / 1 2 3 enter / 0 dot / knob-cw knob-ccw knob-press); value = shell command run via your login shell ($SHELL -ilc). A key omitted from a profile falls through to \"default\"; a key set to \"\" is disabled there. knob-cw/knob-ccw commands always see $KD100_DELTA (this turn's magnitude) and $KD100_VELOCITY (smoothed detents/sec) in their environment. Top-level knobSpinRepeat (true/false) makes a fast spin run the knob command up to knobMaxRepeat times. Edit in the menu-bar app's Settings window (applies live), or edit here — changes are picked up live."
 
     /// One named binding set. Profiles are cycled manually by the knob press.
     private struct Profile {
@@ -123,6 +123,25 @@ final class Mapping {
     private var lastWrittenJSON: String?     // guarded by `lock`; suppresses self-write reloads
     private var _identifyMode = false        // guarded by `lock`
     private var watcher: FileWatcher?
+
+    // Knob velocity / continuous mode (global, not per-profile). Both guarded by `lock`.
+    private var _knobSpinRepeat = false      // a fast spin runs the command multiple times
+    private var _knobMaxRepeat = 4           // cap on that repeat count
+
+    /// When on, a single fast knob turn (the device reports a delta > 1) runs the bound
+    /// knob command that many times — so a quick flick covers several detents. Off by
+    /// default, where every turn report fires exactly once. Either way the command always
+    /// sees `$KD100_DELTA` (this report's magnitude) and `$KD100_VELOCITY` (smoothed
+    /// detents/sec) in its environment, so a script can scale itself instead.
+    var knobSpinRepeat: Bool {
+        get { withLock { _knobSpinRepeat } }
+        set { withLock { _knobSpinRepeat = newValue } }
+    }
+    /// Upper bound on the spin-repeat count (clamped to 1…20).
+    var knobMaxRepeat: Int {
+        get { withLock { _knobMaxRepeat } }
+        set { withLock { _knobMaxRepeat = max(1, min(newValue, 20)) } }
+    }
 
     /// When true, controls are reported via `onControl` but their commands are NOT
     /// run — used by the Settings "Listen" mode so the user can press keys to locate
@@ -236,7 +255,12 @@ final class Mapping {
         }
         guard !parsed.isEmpty else { return }
 
+        let spin = (obj["knobSpinRepeat"] as? Bool) ?? false
+        let maxRep = (obj["knobMaxRepeat"] as? Int) ?? 4
+
         withLock {
+            _knobSpinRepeat = spin
+            _knobMaxRepeat = max(1, min(maxRep, 20))
             let prevName = profiles.isEmpty ? "default" : profiles[safeActiveIndexLocked()].name
             // The default profile keeps the built-in defaults as a base, with the
             // file's values merged over it (so a partial/hand-edited file still has
@@ -275,9 +299,12 @@ final class Mapping {
             return head + ",\n      \"bindings\": {\n" + lines.joined(separator: ",\n") + "\n      }\n    }"
         }
         let body = snap.map(block).joined(separator: ",\n")
+        let (spin, maxRep) = withLock { (_knobSpinRepeat, _knobMaxRepeat) }
         let json = """
         {
           "_note": "\(esc(Mapping.configNote))",
+          "knobSpinRepeat": \(spin ? "true" : "false"),
+          "knobMaxRepeat": \(maxRep),
           "profiles": [
         \(body)
           ]
@@ -378,11 +405,32 @@ final class Mapping {
             if identifyMode { onControl?(name, nil, false) } else { cycleProfile() }
             return
         }
+        fire(name: name)
+    }
+
+    /// Run a knob turn. Always exposes `$KD100_DELTA` / `$KD100_VELOCITY` to the command;
+    /// when spin-to-repeat is on, a multi-detent report runs the command that many times
+    /// (capped) so a fast flick covers several steps. See `knobSpinRepeat`.
+    func dispatchKnobTurn(cw: Bool, delta: Int, velocity: Int) {
+        let name = cw ? "knob-cw" : "knob-ccw"
+        let (spin, maxRep) = withLock { (_knobSpinRepeat, _knobMaxRepeat) }
+        let count = spin ? min(max(1, delta), maxRep) : 1
+        let env = ["KD100_DELTA": String(delta), "KD100_VELOCITY": String(velocity)]
+        fire(name: name, env: env, repeatCount: count)
+    }
+
+    /// Resolve `name` in the active profile, report it via `onControl`, and run it (unless
+    /// in identify/Listen mode or the binding is blank). `repeatCount > 1` runs the command
+    /// that many times **in one shell** (`cmd ; cmd ; …`) so the steps stay ordered.
+    private func fire(name: String, env: [String: String]? = nil, repeatCount: Int = 1) {
         let cmd = activeBinding(for: name)
         let willRun = !identifyMode && (cmd?.isEmpty == false)
         onControl?(name, cmd, willRun)
         guard willRun, let cmd = cmd else { return }
-        execute(name: name, cmd: cmd, completion: nil)
+        let toRun = repeatCount > 1
+            ? Array(repeating: cmd, count: repeatCount).joined(separator: " ; ")
+            : cmd
+        execute(name: name, cmd: toRun, env: env, completion: nil)
     }
 
     /// Run an explicit command for a key (used by the Settings "test" button so the
@@ -398,12 +446,18 @@ final class Mapping {
     /// Spawn `$SHELL -ilc <cmd>` and capture exit status + stderr without blocking
     /// (a `terminationHandler` finalizes, so a command that backgrounds a process
     /// can't pin a reader thread). stdout is discarded.
-    private func execute(name: String, cmd: String, completion: ((Int32, String) -> Void)?) {
+    private func execute(name: String, cmd: String, env: [String: String]? = nil,
+                         completion: ((Int32, String) -> Void)?) {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: shell)
         p.arguments = ["-ilc", cmd]
         p.standardOutput = FileHandle.nullDevice
+        if let env {   // merge over the inherited environment so PATH/tools survive
+            var merged = ProcessInfo.processInfo.environment
+            for (k, v) in env { merged[k] = v }
+            p.environment = merged
+        }
 
         let errPipe = Pipe()
         p.standardError = errPipe

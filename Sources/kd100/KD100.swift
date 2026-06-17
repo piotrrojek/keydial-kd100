@@ -31,9 +31,12 @@ final class KD100 {
     private var manager: IOHIDManager!
     private var buffers: [UnsafeMutablePointer<UInt8>] = []
 
-    // Pure decoder: HID report → control id(s), with press edge-detection so each
-    // press fires once (key-up + auto-repeat filtered). See Decode.swift.
+    // Pure decoder: HID report → physical event(s), with press edge-detection so each
+    // press fires once (held-key re-sends filtered). See Decode.swift.
     private var decoder = ReportDecoder()
+    // Tracks knob spin speed (detents/sec) to surface as $KD100_VELOCITY. Pure helper,
+    // fed the monotonic clock here in the live path.
+    private var knobVelocity = KnobVelocity()
 
     init(mode: Mode) {
         self.mode = mode
@@ -141,8 +144,21 @@ final class KD100 {
     private func dispatchValue(page: Int, usage: Int, value: Int) {}
 
     private func dispatchReport(id: Int, bytes: [UInt8]) {
-        for rawID in decoder.decode(reportID: id, bytes: bytes) {
-            mapping.dispatch(rawID)
+        for event in decoder.decode(reportID: id, bytes: bytes) {
+            switch event {
+            case .keyDown(let rawID):
+                mapping.dispatch(rawID)
+            case .keyUp:
+                break                       // used by the gesture layer (hold/double-tap)
+            case .knobPress:
+                mapping.dispatch("dial:press")   // reserved: cycles profiles
+            case .knobRelease:
+                break
+            case .knobTurn(let cw, let delta):
+                let v = knobVelocity.observe(cw: cw, delta: delta,
+                                             now: ProcessInfo.processInfo.systemUptime)
+                mapping.dispatchKnobTurn(cw: cw, delta: delta, velocity: v)
+            }
         }
     }
 }

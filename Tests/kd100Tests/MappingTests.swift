@@ -200,4 +200,58 @@ final class MappingTests: XCTestCase {
         XCTAssertEqual(m.cycleProfile(), "default")    // T -> default (wrap)
         XCTAssertEqual(fired, ["T", "default"])
     }
+
+    // MARK: - Knob velocity / continuous mode
+
+    func testKnobOptionsDefaultAndRoundTrip() {
+        let m = Mapping(path: configPath)
+        XCTAssertFalse(m.knobSpinRepeat)   // off by default (back-compat)
+        XCTAssertEqual(m.knobMaxRepeat, 4)
+
+        m.knobSpinRepeat = true
+        m.knobMaxRepeat = 25               // clamps into 1…20
+        XCTAssertEqual(m.knobMaxRepeat, 20)
+        m.replaceAllProfiles([("default", Mapping.defaultsDict())])   // persists everything
+
+        let m2 = Mapping(path: configPath)
+        XCTAssertTrue(m2.knobSpinRepeat)
+        XCTAssertEqual(m2.knobMaxRepeat, 20)
+    }
+
+    func testKnobTurnDispatchReportsDirection() {
+        let m = Mapping(path: configPath)
+        m.identifyMode = true   // report via onControl but don't spawn a shell
+        var seen: [String] = []
+        m.onControl = { name, _, _ in seen.append(name) }
+        m.dispatchKnobTurn(cw: true, delta: 1, velocity: 1)
+        m.dispatchKnobTurn(cw: false, delta: 2, velocity: 5)
+        XCTAssertEqual(seen, ["knob-cw", "knob-ccw"])
+    }
+
+    func testSpinRepeatRunsCommandOncePerDetent() {
+        let m = Mapping(path: configPath)
+        let out = tmpDir.appendingPathComponent("spin.log").path
+        m.knobSpinRepeat = true
+        m.knobMaxRepeat = 10
+        m.update(["knob-cw": "printf x >> '\(out)'"])
+        let done = expectation(description: "ran")
+        m.onResult = { name, _, _ in if name == "knob-cw" { done.fulfill() } }
+        m.dispatchKnobTurn(cw: true, delta: 3, velocity: 9)   // 3 detents → 3 appends, one shell
+        wait(for: [done], timeout: 20)
+        let written = (try? String(contentsOfFile: out, encoding: .utf8)) ?? ""
+        XCTAssertEqual(written, "xxx")
+    }
+
+    func testSpinRepeatOffRunsOnce() {
+        let m = Mapping(path: configPath)
+        let out = tmpDir.appendingPathComponent("spin-off.log").path
+        XCTAssertFalse(m.knobSpinRepeat)
+        m.update(["knob-cw": "printf x >> '\(out)'"])
+        let done = expectation(description: "ran")
+        m.onResult = { name, _, _ in if name == "knob-cw" { done.fulfill() } }
+        m.dispatchKnobTurn(cw: true, delta: 3, velocity: 9)   // delta ignored when spin is off
+        wait(for: [done], timeout: 20)
+        let written = (try? String(contentsOfFile: out, encoding: .utf8)) ?? ""
+        XCTAssertEqual(written, "x")
+    }
 }
