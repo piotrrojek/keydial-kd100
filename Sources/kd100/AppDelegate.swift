@@ -15,7 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var settings: SettingsWindowController?
     private let status = StatusExporter()   // publishes ~/.config/kd100/status.json for an external bar
     private let hud = HUDController()        // on-screen profile-switch flash + cheat-sheet reveal
-    private var hotKey: GlobalHotKey?        // ⌥⌘K → toggle the cheat-sheet
+    private var hotKey: GlobalHotKey?        // global shortcut → toggle the cheat-sheet
+    private var hotkeyPref = CheatSheetHotkey.load()   // user-rebindable; defaults to ⌥⌘K
+    private var cheatItem: NSMenuItem!       // its title shows the current shortcut
     private var lastShownProfile: String?    // dedupe so the HUD flashes only on a real change
 
     // Menu items kept around so callbacks can mutate their titles/state.
@@ -35,10 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
-        hotKey = GlobalHotKey(keyCode: UInt32(kVK_ANSI_K),
-                              modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
-            self?.toggleCheatSheet()
-        }
+        registerCheatSheetHotkey()
 
         wireEngine()
         engine.start()
@@ -70,7 +69,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let cheatItem = NSMenuItem(title: "Show Cheat-Sheet  (⌥⌘K)", action: #selector(toggleCheatSheet), keyEquivalent: "")
+        cheatItem = NSMenuItem(title: "Show Cheat-Sheet  (\(hotkeyPref.display))",
+                               action: #selector(toggleCheatSheet), keyEquivalent: "")
         cheatItem.target = self
         menu.addItem(cheatItem)
 
@@ -182,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 guard let self else { return }
                 self.updateProfileLine(self.engine.mapping.activeProfileName)
             }
+            settings?.onHotkeyChanged = { [weak self] in self?.reloadCheatSheetHotkey() }
         }
         NSApp.activate(ignoringOtherApps: true)
         settings?.showWindow(nil)
@@ -197,6 +198,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @objc private func quit() { NSApp.terminate(nil) }
 
     // MARK: - Cheat-sheet + failure notifications
+
+    /// (Re)register the global cheat-sheet hotkey from the stored preference, and reflect
+    /// it in the menu item. Setting `hotKey` to nil first unregisters the old one before
+    /// the new one claims the same Carbon id.
+    private func registerCheatSheetHotkey() {
+        hotKey = nil
+        hotKey = GlobalHotKey(keyCode: hotkeyPref.keyCode, modifiers: hotkeyPref.modifiers) { [weak self] in
+            self?.toggleCheatSheet()
+        }
+        cheatItem?.title = "Show Cheat-Sheet  (\(hotkeyPref.display))"
+    }
+
+    /// Called by the Settings window after it records + saves a new shortcut.
+    private func reloadCheatSheetHotkey() {
+        hotkeyPref = CheatSheetHotkey.load()
+        registerCheatSheetHotkey()
+    }
 
     @objc private func toggleCheatSheet() {
         let name = engine.mapping.activeProfileName

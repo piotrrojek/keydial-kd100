@@ -86,6 +86,11 @@ The menu bar icon's menu shows:
     tunes the hold threshold and the double-tap window. A key with neither has zero added
     latency (it still fires on press); a double-bound key waits one window before its tap
     resolves.
+- **Show Cheat-Sheet** — reveal an on-screen overlay of the active profile's bindings on
+  a faithful render of the pad (keys with a hold/double action show a dot). Toggle it with
+  a **global shortcut** (default **⌥⌘K**), which you can rebind in Settings → *Cheat-sheet
+  shortcut* (it's a Carbon hotkey, so no Accessibility permission is needed). The active
+  profile also flashes briefly whenever you switch with the knob.
 - **Open at Login** — register/unregister as a login item (macOS 13+).
 - **Quit KD100**.
 
@@ -212,6 +217,10 @@ active profile's bindings) lives in [`examples/sketchybar/`](examples/sketchybar
 - `Sources/kd100/AppDelegate.swift` — menu-bar status item, menu, engine wiring.
 - `Sources/kd100/SettingsWindow.swift` — the editor window: device map, Listen mode,
   per-key test-fire.
+- `Sources/kd100/HUD.swift` / `DeviceView.swift` / `Theme.swift` — the on-screen cheat-sheet
+  overlay (floating non-activating panel), the faithful device render, and the shared design tokens.
+- `Sources/kd100/GlobalHotKey.swift` / `CheatSheetHotkey.swift` — the Carbon global hotkey and
+  its user-rebindable preference.
 - `Sources/kd100/StatusIcon.swift` — the menu-bar dial icon.
 - `Tests/kd100Tests/` — decoder, config round-trip, shell-execution, and Settings-build
   tests (`swift test`).

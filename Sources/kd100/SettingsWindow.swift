@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import UniformTypeIdentifiers
 
 /// Settings window: the faithful device map up top (click a key to edit it; turn on
@@ -33,6 +34,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     /// Called after the profile set is committed (Save), so the tray app can refresh
     /// the active-profile menu line.
     var onProfilesChanged: (() -> Void)?
+
+    /// Called after the cheat-sheet shortcut is recorded + saved, so the tray app can
+    /// re-register the global hotkey live.
+    var onHotkeyChanged: (() -> Void)?
+
+    // Cheat-sheet shortcut recorder.
+    private var hotkeyButton: NSButton!
+    private var recordingHotkey = false
+    private var hotkeyMonitor: Any?
+    private var currentHotkey = CheatSheetHotkey.load()
 
     /// In-memory working copy of every profile. Edits live here until Save commits the
     /// whole set in one shot (`mapping.replaceAllProfiles`) — so switching the editor
@@ -171,6 +182,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         form.addArrangedSubview(makeSectionHeader("Gestures"))
         form.setCustomSpacing(8, after: form.arrangedSubviews.last!)
         form.addArrangedSubview(makeGestureOptions())
+
+        form.addArrangedSubview(makeSectionHeader("Cheat-sheet shortcut"))
+        form.setCustomSpacing(8, after: form.arrangedSubviews.last!)
+        form.addArrangedSubview(makeHotkeyOptions())
 
         let pathLabel = NSTextField(labelWithString: mapping.path)
         pathLabel.textColor = .tertiaryLabelColor
@@ -451,6 +466,64 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     @objc private func holdChanged(_ s: NSStepper) { holdValue.stringValue = String(s.integerValue) }
     @objc private func doubleChanged(_ s: NSStepper) { doubleValue.stringValue = String(s.integerValue) }
+
+    /// The cheat-sheet shortcut recorder: a button showing the current combo; click to
+    /// record a new one (the global hotkey applies immediately, no Save needed).
+    private func makeHotkeyOptions() -> NSView {
+        let label = NSTextField(labelWithString: "Show cheat-sheet:")
+        label.font = .systemFont(ofSize: 12)
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        hotkeyButton = NSButton(title: currentHotkey.display, target: self, action: #selector(recordHotkeyTapped))
+        hotkeyButton.bezelStyle = .rounded
+        hotkeyButton.translatesAutoresizingMaskIntoConstraints = false
+        hotkeyButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 130).isActive = true
+
+        let row = NSStackView(views: [label, hotkeyButton])
+        row.orientation = .horizontal; row.spacing = 8; row.alignment = .centerY
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let hint = NSTextField(wrappingLabelWithString:
+            "Click, then press the keys you want (with at least one modifier). Esc cancels. "
+            + "Applies immediately and works system-wide — no Accessibility permission needed.")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        hint.preferredMaxLayoutWidth = 520
+
+        let stack = NSStackView(views: [row, hint])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    @objc private func recordHotkeyTapped() {
+        if recordingHotkey { stopRecordingHotkey(); return }
+        recordingHotkey = true
+        hotkeyButton.title = "Recording… (Esc to cancel)"
+        hotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self else { return event }
+            let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if event.keyCode == UInt16(kVK_Escape) && mods.isEmpty {
+                self.stopRecordingHotkey()
+                return nil
+            }
+            if let hk = CheatSheetHotkey.from(event: event) {
+                self.currentHotkey = hk
+                hk.save()
+                self.stopRecordingHotkey()
+                self.onHotkeyChanged?()
+                self.savedLabel.stringValue = "Cheat-sheet shortcut set to \(hk.display)"
+            }
+            return nil   // swallow keystrokes while recording
+        }
+    }
+
+    private func stopRecordingHotkey() {
+        recordingHotkey = false
+        if let m = hotkeyMonitor { NSEvent.removeMonitor(m); hotkeyMonitor = nil }
+        hotkeyButton.title = currentHotkey.display
+    }
 
     private func syncGestureOptions() {
         holdStepper.integerValue = mapping.holdMs
@@ -839,5 +912,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         listening = false
         mapping.identifyMode = false
         listenButton?.state = .off
+        if recordingHotkey { stopRecordingHotkey() }   // don't leak the key monitor
     }
 }
