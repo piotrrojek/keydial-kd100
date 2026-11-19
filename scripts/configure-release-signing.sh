@@ -1,5 +1,6 @@
 #!/bin/bash
-set -euo pipefail
+set -eEuo pipefail
+trap 'printf "Signing setup failed at line %s\n" "$LINENO" >&2' ERR
 umask 077
 
 keychain="$RUNNER_TEMP/release-signing.keychain-db"
@@ -20,8 +21,18 @@ escape_security_argument() {
         "$certificate" "$keychain" "$(escape_security_argument "$SIGNING_CERTIFICATE_PASSWORD")"
     printf 'set-key-partition-list -S apple-tool:,apple: -s -k "%s" "%s"\n' "$keychain_password" "$keychain"
 } | security -qi > /dev/null 2>&1
-security find-identity -v -p codesigning "$keychain" | grep -q 'Developer ID Application:'
 security list-keychains -d user -s "$keychain"
+# A fresh runner may not have either Developer ID issuing intermediate.
+for authority in DeveloperIDCA DeveloperIDG2CA; do
+    public_cert="$RUNNER_TEMP/$authority.cer"
+    curl -fsS "https://www.apple.com/certificateauthority/$authority.cer" -o "$public_cert"
+    security add-certificates -k "$keychain" "$public_cert"
+done
+identities=$(security find-identity -v -p codesigning "$keychain")
+if [[ "$identities" != *'Developer ID Application:'* ]]; then
+    printf '%s\n' 'The release keychain has no trusted Developer ID Application identity.' >&2
+    exit 1
+fi
 
 export RELEASE_SIGNING_KEYCHAIN="$keychain"
 expect <<'EXPECT'
@@ -34,6 +45,10 @@ expect {
     eof { puts stderr "Notarytool exited before prompting for credentials"; exit 1 }
 }
 expect {
+    -re {HTTP status code: ([0-9]{3})} {
+        puts stderr "Apple notarization authentication returned HTTP $expect_out(1,string)"
+        exp_continue
+    }
     eof { exit [lindex [wait] 3] }
     timeout { puts stderr "Notarytool credential validation timed out"; exit 1 }
 }
