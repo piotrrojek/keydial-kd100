@@ -19,6 +19,10 @@ IDENTITY="Developer ID Application: Otherland Labs sp. z o.o. (RE4JN752MW)"
 INSTALLER_IDENTITY="Developer ID Installer: Otherland Labs sp. z o.o. (RE4JN752MW)"
 BUNDLE_ID="dev.otherlandlabs.kd100"
 NOTARY_PROFILE="notary-profile"
+NOTARY_KEYCHAIN=()
+if [[ -n "${RELEASE_SIGNING_KEYCHAIN:-}" ]]; then
+  NOTARY_KEYCHAIN=(--keychain "$RELEASE_SIGNING_KEYCHAIN")
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/release-build"
@@ -61,7 +65,7 @@ codesign -vvv --strict "$APP"
 
 echo "==> Notarizing app"
 ditto -c -k --keepParent "$APP" "$BUILD_DIR/kd100.zip"
-xcrun notarytool submit "$BUILD_DIR/kd100.zip" --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun notarytool submit "$BUILD_DIR/kd100.zip" --keychain-profile "$NOTARY_PROFILE" "${NOTARY_KEYCHAIN[@]}" --wait
 xcrun stapler staple "$APP"
 
 echo "==> Building installer package"
@@ -89,7 +93,7 @@ pkgbuild --root "$PKG_ROOT" --scripts "$PKG_SCRIPTS" \
 rm -rf "$PKG_ROOT" "$PKG_SCRIPTS" "$BUILD_DIR/kd100.zip"
 
 echo "==> Notarizing installer package"
-xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" "${NOTARY_KEYCHAIN[@]}" --wait
 xcrun stapler staple "$PKG"
 
 echo "==> Done. release-build/ contains kd100.app and $(basename "$PKG")"

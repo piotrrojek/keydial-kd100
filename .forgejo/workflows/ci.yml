@@ -1,0 +1,12 @@
+name: CI
+on:
+  push:
+    branches:
+      - '**'
+jobs:
+  build-and-test:
+    runs-on: appliedai-macos
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - run: swift build
+      - run: swift test
